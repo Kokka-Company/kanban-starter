@@ -5,10 +5,13 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
+  closestCenter,
   closestCorners,
+  pointerWithin,
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -74,6 +77,21 @@ export default function Board({
   const [dragLanes, setDragLanes] = useState<Lanes | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
   const lanes = dragLanes ?? settled
+
+  /**
+   * Where a drop lands. The pointer picks the column; inside it, the nearest card
+   * by centre picks the spot (or the empty column itself). Plain closest-corners
+   * picked a card in the neighbouring column whenever the target column was empty
+   * or much shorter, so drops into e.g. an empty "Doing" snapped back. It's kept
+   * only for the gaps between columns.
+   */
+  const collide: CollisionDetection = (args) => {
+    const column = pointerWithin(args).find((c) => (COLUMNS as readonly string[]).includes(String(c.id)))
+    if (!column) return closestCorners(args)
+    const inColumn = new Set(lanes[column.id as Column].filter((id) => id !== args.active.id))
+    const cards = args.droppableContainers.filter((c) => inColumn.has(String(c.id)))
+    return cards.length ? closestCenter({ ...args, droppableContainers: cards }) : [column]
+  }
 
   const sensors = useSensors(
     // A few pixels of travel before a drag starts, so a click still opens the card.
@@ -148,7 +166,7 @@ export default function Board({
   return (
     <DndContext
       sensors={canEdit ? sensors : noSensors}
-      collisionDetection={closestCorners}
+      collisionDetection={collide}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDragEnd={onDragEnd}
