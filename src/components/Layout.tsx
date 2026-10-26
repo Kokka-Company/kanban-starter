@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { LogOut, Search, Settings } from 'lucide-react'
+import { CalendarDays, LogOut, Search, Settings } from 'lucide-react'
 import { useMe } from '../lib/me'
 import { Avatar } from './ui'
 
@@ -42,6 +42,9 @@ export default function Layout({ children }: { children: ReactNode }) {
           </form>
 
           <nav className="flex shrink-0 items-center gap-1">
+            <Link to="/calendar" className="p-2 text-fg-subtle hover:text-fg" title="Calendar">
+              <CalendarDays className="h-5 w-5" />
+            </Link>
             {me.isAdmin && (
               <Link to="/admin" className="p-2 text-fg-subtle hover:text-fg" title="Admin">
                 <Settings className="h-5 w-5" />

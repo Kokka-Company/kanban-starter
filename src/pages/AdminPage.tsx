@@ -9,14 +9,18 @@ import {
   type Workspace,
   type ApiKeyRecord,
   type KeyScope,
+  type Label,
+  type LabelColor,
   type Member,
   type Role,
 } from '../lib/api'
 import { useMe } from '../lib/me'
 import { ErrorNote, PageHeader, Spinner } from '../components/ui'
 import ActivityRow from '../components/ActivityRow'
+import { LabelChip } from '../components/pickers'
+import { useLabels } from '../lib/labels'
 
-type Tab = 'members' | 'workspaces' | 'keys' | 'activity'
+type Tab = 'members' | 'workspaces' | 'labels' | 'keys' | 'activity'
 
 /** `/admin` — who can get in and see what, workspace settings, API keys for AI, and the activity log. */
 export default function AdminPage() {
@@ -25,6 +29,7 @@ export default function AdminPage() {
     ['members', 'People & access'],
     ['workspaces', 'Workspaces & Teams'],
     ['keys', 'API keys'],
+    ['labels', 'Labels'],
     ['activity', 'Activity log'],
   ]
   return (
@@ -44,6 +49,7 @@ export default function AdminPage() {
       {tab === 'members' && <MembersTab />}
       {tab === 'workspaces' && <WorkspacesTab />}
       {tab === 'keys' && <KeysTab />}
+      {tab === 'labels' && <LabelsTab />}
       {tab === 'activity' && <ActivityTab />}
     </>
   )
@@ -325,18 +331,29 @@ function WorkspaceRow({
   onDelete,
 }: {
   workspace: Workspace
-  onSave: (patch: Partial<Pick<Workspace, 'name' | 'teamsWebhookUrl'>>) => Promise<void>
+  onSave: (patch: Partial<Pick<Workspace, 'name' | 'teamsWebhookUrl' | 'prefix'>>) => Promise<void>
   onDelete: () => Promise<void>
 }) {
   const [name, setName] = useState(workspace.name)
+  const [prefix, setPrefix] = useState(workspace.prefix || '')
   const [hook, setHook] = useState(workspace.teamsWebhookUrl || '')
-  const dirty = name !== workspace.name || hook !== (workspace.teamsWebhookUrl || '')
+  const dirty = name !== workspace.name || prefix !== (workspace.prefix || '') || hook !== (workspace.teamsWebhookUrl || '')
 
   return (
-    <li className="grid gap-3 p-5 md:grid-cols-[14rem_1fr_auto] md:items-end">
+    <li className="grid gap-3 p-5 md:grid-cols-[14rem_6rem_1fr_auto] md:items-end">
       <div>
         <label className="label" htmlFor={`ag-${workspace.id}`}>Name</label>
         <input id={`ag-${workspace.id}`} className="input" value={name} onChange={(e) => setName(e.target.value)} />
+      </div>
+      <div>
+        <label className="label" htmlFor={`pre-${workspace.id}`} title="Task numbers look like PREFIX-12">Prefix</label>
+        <input
+          id={`pre-${workspace.id}`}
+          className="input font-mono uppercase"
+          maxLength={5}
+          value={prefix}
+          onChange={(e) => setPrefix(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+        />
       </div>
       <div>
         <label className="label" htmlFor={`hook-${workspace.id}`}>Teams Workflow webhook URL</label>
@@ -349,7 +366,7 @@ function WorkspaceRow({
         />
       </div>
       <div className="flex gap-2">
-        <button className="btn-primary" disabled={!dirty} onClick={() => void onSave({ name, teamsWebhookUrl: hook })}>Save</button>
+        <button className="btn-primary" disabled={!dirty} onClick={() => void onSave({ name, teamsWebhookUrl: hook, ...(prefix !== (workspace.prefix || '') ? { prefix } : {}) })}>Save</button>
         <button
           className="btn-danger"
           title={workspace.projectCount ? 'Delete its projects first' : 'Delete workspace'}
@@ -359,6 +376,98 @@ function WorkspaceRow({
           <Trash2 className="h-4 w-4" />
         </button>
       </div>
+    </li>
+  )
+}
+
+// --- labels (#10) ----------------------------------------------------------------------
+
+function LabelsTab() {
+  const { labels, colors, reload } = useLabels()
+  const [name, setName] = useState('')
+  const [color, setColor] = useState<LabelColor>('slate')
+  const [error, setError] = useState('')
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setError('')
+    try {
+      await fn()
+      await reload()
+    } catch (err) {
+      setError(errorMessage(err))
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <p className="max-w-3xl text-sm text-fg-muted">
+        Labels are shared by every workspace, like epics in Jira: one label per client, R&amp;D, internal work and so on.
+        Use the same label on projects and tasks so billing and the CRM can pull everything for it in one go
+        (<code className="bg-muted px-1">GET /api/v1/cards?labelId=…</code>). Anyone who can edit can create labels;
+        only admins rename or delete them. Deleting a label removes it from every project and task.
+      </p>
+      <ErrorNote message={error} />
+      <form
+        className="glass flex flex-wrap items-end gap-3 p-5"
+        onSubmit={(e) => {
+          e.preventDefault()
+          void act(async () => {
+            await api.createLabel(name.trim(), color)
+            setName('')
+          })
+        }}
+      >
+        <div className="min-w-56 flex-1">
+          <label className="label" htmlFor="lb-name">New label</label>
+          <input id="lb-name" className="input" placeholder="e.g. Client: Acme" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <ColorSelect value={color} colors={colors} onChange={setColor} id="lb-color" />
+        <button className="btn-primary" disabled={!name.trim()}>Add label</button>
+      </form>
+      {labels.length === 0 ? (
+        <p className="text-sm text-fg-subtle">No labels yet.</p>
+      ) : (
+        <ul className="glass divide-y divide-line">
+          {labels.map((l) => (
+            <LabelRow key={`${l.id}-${l.name}-${l.color}`} label={l} colors={colors} onSave={(patch) => act(() => api.updateLabel(l.id, patch))} onDelete={() => act(() => api.deleteLabel(l.id))} />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function ColorSelect({ value, colors, onChange, id }: { value: LabelColor; colors: LabelColor[]; onChange: (c: LabelColor) => void; id: string }) {
+  return (
+    <div>
+      <label className="label" htmlFor={id}>Colour</label>
+      <select id={id} className="input w-32 capitalize" value={value} onChange={(e) => onChange(e.target.value as LabelColor)}>
+        {colors.map((c) => (
+          <option key={c} value={c}>{c}</option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+function LabelRow({ label, colors, onSave, onDelete }: { label: Label; colors: LabelColor[]; onSave: (p: Partial<Pick<Label, 'name' | 'color'>>) => Promise<void>; onDelete: () => Promise<void> }) {
+  const [name, setName] = useState(label.name)
+  const [color, setColor] = useState<LabelColor>(label.color)
+  const dirty = name.trim() !== label.name || color !== label.color
+  return (
+    <li className="flex flex-wrap items-end gap-3 px-5 py-4">
+      <div className="w-40 pb-2">
+        <LabelChip label={{ ...label, name: name || label.name, color }} />
+      </div>
+      <div className="min-w-48 flex-1">
+        <label className="label" htmlFor={`lbn-${label.id}`}>Name</label>
+        <input id={`lbn-${label.id}`} className="input" value={name} onChange={(e) => setName(e.target.value)} />
+      </div>
+      <ColorSelect value={color} colors={colors} onChange={setColor} id={`lbc-${label.id}`} />
+      <button className="btn-primary" disabled={!dirty || !name.trim()} onClick={() => void onSave({ name: name.trim(), color })}>Save</button>
+      <button className="btn-danger" title="Delete label" onClick={() => window.confirm(`Delete "${label.name}"? It is removed from every project and task.`) && void onDelete()}>
+        <Trash2 className="h-4 w-4" />
+      </button>
     </li>
   )
 }

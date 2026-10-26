@@ -1,5 +1,5 @@
 import { CosmosClient } from '@azure/cosmos'
-import { CONTAINERS, assertField, stripSystemFields } from './containers.mjs'
+import { CONTAINERS, RANGE_OPS, assertField, rangeOps, stripSystemFields } from './containers.mjs'
 
 /**
  * Production store on Azure Cosmos DB for NoSQL. One database with shared throughput
@@ -66,13 +66,21 @@ export function createCosmosStore({ endpoint, key, database, throughput }) {
         const p = `@p${i}`
         if (want && typeof want === 'object' && Array.isArray(want.in)) {
           clauses.push(`ARRAY_CONTAINS(${p}, c.${assertField(field)})`)
-        } else if (want && typeof want === 'object' && 'lt' in want) {
-          clauses.push(`c.${assertField(field)} < ${p}`)
+        } else if (want && typeof want === 'object' && 'has' in want) {
+          clauses.push(`ARRAY_CONTAINS(c.${assertField(field)}, ${p})`)
+          parameters.push({ name: p, value: want.has })
+          return
+        } else if (rangeOps(want)) {
+          rangeOps(want).forEach((op, j) => {
+            clauses.push(`c.${assertField(field)} ${RANGE_OPS[op]} ${p}_${j}`)
+            parameters.push({ name: `${p}_${j}`, value: want[op] })
+          })
+          return
         } else {
           clauses.push(`c.${assertField(field)} = ${p}`)
           if (field === CONTAINERS[name]) partitionKey = want
         }
-        parameters.push({ name: p, value: want?.in ?? (want && typeof want === 'object' && 'lt' in want ? want.lt : want) })
+        parameters.push({ name: p, value: want?.in ?? want })
       })
       if (opts.contains?.text) {
         parameters.push({ name: '@q', value: opts.contains.text })
@@ -89,6 +97,23 @@ export function createCosmosStore({ endpoint, key, database, throughput }) {
       const c = await container(name)
       const { resource } = await c.items.upsert(doc)
       return stripSystemFields(resource)
+    },
+
+    /** Atomic: Cosmos applies the partial-update `incr` server-side, so parallel callers never get the same number. */
+    async increment(id) {
+      const c = await container('counters')
+      const bump = async () => (await c.item(id, id).patch([{ op: 'incr', path: '/value', value: 1 }])).resource.value
+      try {
+        return await bump()
+      } catch (err) {
+        if (err.code !== 404) throw err
+        try {
+          await c.items.create({ id, value: 0 })
+        } catch (e) {
+          if (e.code !== 409) throw e // someone else created it first: fine
+        }
+        return bump()
+      }
     },
 
     async remove(name, doc) {

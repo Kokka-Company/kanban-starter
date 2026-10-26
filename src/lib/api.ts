@@ -23,6 +23,8 @@ export interface Stamp {
 export interface Workspace {
   id: string
   name: string
+  /** Task-number prefix, e.g. ENG → ENG-12. */
+  prefix?: string
   teamsWebhookUrl?: string // admins only
   hasTeams?: boolean
   projectCount?: number
@@ -35,6 +37,12 @@ export interface Project {
   description: string
   repoUrl: string
   archived: boolean
+  dueDate: string | null
+  /** No end date ("indefinite"). */
+  ongoing: boolean
+  labelIds: string[]
+  /** Set when this project was made from a task. */
+  parentCardId: string | null
   cardCount?: number
   openCount?: number
 }
@@ -53,13 +61,67 @@ export interface Card {
   description: string
   column: Column
   order: number
-  assigneeEmail: string | null
+  number: number | null
+  /** e.g. ENG-12 */
+  key: string | null
+  assigneeEmails: string[]
+  startDate: string | null
   dueDate: string | null
+  /** The guess, in hours. */
+  estimateHours: number | null
+  /** The guess plus the buffer (+30%). */
+  plannedHours: number | null
+  delayed: boolean
+  delayReason: string
+  labelIds: string[]
+  /** Set when this task was turned into a project. */
+  childProjectId: string | null
   checklist: ChecklistItem[]
   commentCount: number
   createdBy: Stamp
   updatedBy: Stamp
   projectName?: string
+}
+
+export type CardPatch = Partial<
+  Pick<
+    Card,
+    | 'title'
+    | 'description'
+    | 'column'
+    | 'order'
+    | 'assigneeEmails'
+    | 'startDate'
+    | 'dueDate'
+    | 'estimateHours'
+    | 'delayed'
+    | 'delayReason'
+    | 'labelIds'
+    | 'checklist'
+  >
+>
+
+export type LabelColor = 'slate' | 'blue' | 'teal' | 'green' | 'amber' | 'orange' | 'red' | 'pink' | 'violet'
+
+export interface Label {
+  id: string
+  name: string
+  color: LabelColor
+}
+
+export interface HourTotals {
+  overall: number
+  unassigned: number
+  byPerson: Record<string, number>
+}
+
+export interface CalendarData {
+  from: string
+  to: string
+  cards: Card[]
+  unscheduled: Card[]
+  totals: HourTotals
+  people: Person[]
 }
 
 export interface Comment {
@@ -132,6 +194,7 @@ export interface Me {
   isAdmin: boolean
   canEdit: boolean
   editDomains: string[]
+  estimateBuffer: number
   workspaces: Workspace[]
 }
 
@@ -200,7 +263,7 @@ export const api = {
 
   workspaces: () => request<{ workspaces: Workspace[] }>('GET', 'workspaces'),
   createWorkspace: (name: string) => request<{ workspace: Workspace }>('POST', 'workspaces', { name }),
-  updateWorkspace: (id: string, patch: Partial<Pick<Workspace, 'name' | 'teamsWebhookUrl'>>) =>
+  updateWorkspace: (id: string, patch: Partial<Pick<Workspace, 'name' | 'teamsWebhookUrl' | 'prefix'>>) =>
     request<{ workspace: Workspace }>('PATCH', `workspaces/${enc(id)}`, patch),
   deleteWorkspace: (id: string) => request('DELETE', `workspaces/${enc(id)}`),
 
@@ -209,22 +272,50 @@ export const api = {
       'GET',
       `workspaces/${enc(workspaceId)}/projects${archived ? '?archived=true' : ''}`,
     ),
-  createProject: (workspaceId: string, p: Pick<Project, 'name' | 'description' | 'repoUrl'>) =>
-    request<{ project: Project }>('POST', `workspaces/${enc(workspaceId)}/projects`, p),
+  createProject: (
+    workspaceId: string,
+    p: Pick<Project, 'name' | 'description' | 'repoUrl'> & Partial<Pick<Project, 'dueDate' | 'ongoing' | 'labelIds'>>,
+  ) => request<{ project: Project }>('POST', `workspaces/${enc(workspaceId)}/projects`, p),
   board: (projectId: string) =>
-    request<{ project: Project; workspace: Workspace; cards: Card[]; members: Person[] }>('GET', `projects/${enc(projectId)}`),
-  updateProject: (id: string, patch: Partial<Pick<Project, 'name' | 'description' | 'repoUrl' | 'archived'>>) =>
+    request<{
+      project: Project
+      workspace: Workspace
+      cards: Card[]
+      members: Person[]
+      parentCard: { id: string; projectId: string; title: string; key: string | null } | null
+    }>('GET', `projects/${enc(projectId)}`),
+  updateProject: (
+    id: string,
+    patch: Partial<Pick<Project, 'name' | 'description' | 'repoUrl' | 'archived' | 'dueDate' | 'ongoing' | 'labelIds'>>,
+  ) =>
     request<{ project: Project }>('PATCH', `projects/${enc(id)}`, patch),
   deleteProject: (id: string) => request('DELETE', `projects/${enc(id)}`),
 
   createCard: (projectId: string, c: { title: string; column: Column }) =>
     request<{ card: Card }>('POST', `projects/${enc(projectId)}/cards`, c),
-  card: (id: string) => request<{ card: Card; comments: Comment[] }>('GET', `cards/${enc(id)}`),
-  updateCard: (
-    id: string,
-    patch: Partial<Pick<Card, 'title' | 'description' | 'column' | 'order' | 'assigneeEmail' | 'dueDate' | 'checklist'>>,
-  ) => request<{ card: Card }>('PATCH', `cards/${enc(id)}`, patch),
+  card: (id: string) =>
+    request<{
+      card: Card
+      comments: Comment[]
+      childProject: { id: string; name: string; cardCount: number; doneCount: number } | null
+    }>('GET', `cards/${enc(id)}`),
+  updateCard: (id: string, patch: CardPatch) => request<{ card: Card }>('PATCH', `cards/${enc(id)}`, patch),
   deleteCard: (id: string) => request('DELETE', `cards/${enc(id)}`),
+  // Writes always carry a JSON body (the API refuses anything else), hence the empty {}.
+  duplicateCard: (id: string) => request<{ card: Card }>('POST', `cards/${enc(id)}/duplicate`, {}),
+  convertCard: (id: string) =>
+    request<{ project: Project; card: Card; cards: Card[] }>('POST', `cards/${enc(id)}/convert`, {}),
+
+  labels: () => request<{ labels: Label[]; colors: LabelColor[] }>('GET', 'labels'),
+  createLabel: (name: string, color?: LabelColor) => request<{ label: Label }>('POST', 'labels', { name, color }),
+  updateLabel: (id: string, patch: Partial<Pick<Label, 'name' | 'color'>>) =>
+    request<{ label: Label }>('PATCH', `labels/${enc(id)}`, patch),
+  deleteLabel: (id: string) => request('DELETE', `labels/${enc(id)}`),
+
+  calendar: (q: { from: string; to: string; workspaceId?: string; assignee?: string; labelId?: string }) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][]).toString()
+    return request<CalendarData>('GET', `calendar?${qs}`)
+  },
 
   addComment: (cardId: string, body: string, mentions: string[]) =>
     request<{ comment: Comment }>('POST', `cards/${enc(cardId)}/comments`, { body, mentions }),
@@ -271,6 +362,31 @@ export function todayISO() {
 
 export function isOverdue(card: Pick<Card, 'dueDate' | 'column'>) {
   return Boolean(card.dueDate && card.column !== 'done' && card.dueDate < todayISO())
+}
+
+/** Hours as "13h" / "2.5h". */
+export function formatHours(h: number | null | undefined) {
+  if (h === null || h === undefined) return ''
+  return `${Math.round(h * 10) / 10}h`
+}
+
+/** Same rounding the API uses: guess × buffer, to one decimal. */
+export function plannedFrom(estimate: number | null, buffer: number) {
+  return estimate === null ? null : Math.round(estimate * buffer * 10) / 10
+}
+
+/** Calendar date maths on plain "YYYY-MM-DD" strings, in local time. */
+export function addDays(iso: string, days: number) {
+  const [y, m, d] = iso.split('-').map(Number)
+  const date = new Date(y, m - 1, d + days)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+export function daysBetween(a: string, b: string) {
+  const [ya, ma, da] = a.split('-').map(Number)
+  const [yb, mb, db] = b.split('-').map(Number)
+  return Math.round((new Date(yb, mb - 1, db).getTime() - new Date(ya, ma - 1, da).getTime()) / 86400000)
 }
 
 export function initials(name: string) {

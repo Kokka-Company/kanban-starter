@@ -7,12 +7,15 @@ export { CONTAINERS } from './containers.mjs'
  *
  *   get(container, id)                 -> doc | null
  *   find(container, where, opts)       -> doc[]
- *       where: { field: value } equality, { field: { in: [...] } }, or { field: { lt: value } }
+ *       where: { field: value } equality, { field: { in: [...] } }, or ranges
+ *              { field: { gte: a, lt: b } } (lt, lte, gt, gte),
+ *              or { field: { has: value } } — the array field contains value
  *       opts:  { contains: { fields: [...], text } }  case-insensitive OR across fields
  *              { orderBy: { field, desc } }
  *              { limit }
  *   put(container, doc)                -> doc   (upsert)
  *   remove(container, doc)
+ *   increment(counterId)               -> next integer (atomic; starts at 1)
  */
 
 let cached = null

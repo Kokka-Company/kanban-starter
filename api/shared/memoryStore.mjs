@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { CONTAINERS, assertField } from './containers.mjs'
+import { CONTAINERS, assertField, rangeOps } from './containers.mjs'
 
 /**
  * Local-dev store: plain objects, optionally saved to a JSON file after every write
@@ -36,7 +36,15 @@ export function createMemoryStore({ file = '' } = {}) {
         Object.entries(where).every(([field, want]) => {
           assertField(field)
           if (want && typeof want === 'object' && Array.isArray(want.in)) return want.in.includes(doc[field])
-          if (want && typeof want === 'object' && 'lt' in want) return doc[field] < want.lt
+          if (want && typeof want === 'object' && 'has' in want) return Array.isArray(doc[field]) && doc[field].includes(want.has)
+          const ops = rangeOps(want)
+          if (ops) {
+            const v = doc[field]
+            if (v === undefined || v === null) return false
+            return ops.every((op) =>
+              op === 'lt' ? v < want.lt : op === 'lte' ? v <= want.lte : op === 'gt' ? v > want.gt : v >= want.gte,
+            )
+          }
           return doc[field] === want
         }),
       )
@@ -64,6 +72,14 @@ export function createMemoryStore({ file = '' } = {}) {
     async remove(container, doc) {
       delete bucket(container)[doc.id]
       save()
+    },
+
+    async increment(id) {
+      const counters = bucket('counters')
+      const value = (counters[id]?.value || 0) + 1
+      counters[id] = { id, value }
+      save()
+      return value
     },
   }
 }

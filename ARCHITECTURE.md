@@ -74,10 +74,10 @@ Membership and role are still checked on every request, so removing a person loc
 | Who | Sees | Can change |
 |---|---|---|
 | Admin | Every workspace | Everything, including people, keys, workspaces and projects |
-| Member | Workspaces ticked for them | Cards and comments in those workspaces |
+| Member | Workspaces ticked for them | Cards, comments and projects in those workspaces (not deleting projects) |
 | Viewer | Workspaces ticked for them | Nothing |
 | Key: Read-only | Its workspaces (or all) | Nothing |
-| Key: Cards & comments | Its workspaces (or all) | Cards and comments |
+| Key: Cards & comments | Its workspaces (or all) | Cards and comments (duplicate too). Not projects |
 | Key: Admin | All workspaces | Workspaces and projects. Never people or keys. |
 
 - **Edit domains:** with `KANBAN_EDIT_DOMAINS` set, anyone outside those domains is a viewer, whatever their record says.
@@ -90,15 +90,20 @@ Membership and role are still checked on every request, so removing a person loc
 
 | Container | Partition key | Holds |
 |---|---|---|
-| `workspaces` | `/id` | name, Teams webhook URL |
+| `workspaces` | `/id` | name, task-number prefix, Teams webhook URL |
 | `members` | `/id` (lower-case email) | name, role, workspaceIds |
-| `projects` | `/workspaceId` | name, description, repo URL, archived |
-| `cards` | `/projectId` | title, description, column, order, assignee, due date, checklist, comment count, created/updated stamps |
+| `projects` | `/workspaceId` | name, description, repo URL, dueDate or ongoing, labelIds, parentCardId, archived |
+| `cards` | `/projectId` | number, title, description, column, order, assigneeEmails, startDate, dueDate, estimateHours, delayed + delayReason, labelIds, checklist, childProjectId, comment count, created/updated stamps |
 | `comments` | `/cardId` | body, mentions, author |
 | `apiKeys` | `/id` | name, scope, workspaceIds, expiresAt, sha256Hash, lastUsedAt, revoked |
 | `activity` | `/workspaceId` (`global` for people and keys) | who, action, summary, old → new changes, route |
+| `labels` | `/id` | name, colour. Shared by every workspace |
+| `counters` | `/id` | `task-<workspaceId>` → the last task number handed out |
 
-Card order is a number. A dropped card gets the midpoint between its new neighbours, so a move writes one document.
+- **Card order:** a number. A dropped card gets the midpoint between its new neighbours, so a move writes one document.
+- **Task numbers:** they come from an atomic counter (a Cosmos partial-update `incr`), so tasks created in parallel never share a number.
+- **Planned hours:** `estimateHours × KANBAN_ESTIMATE_BUFFER` (1.3 by default), computed on read and never stored.
+- **Older records:** a one-time, idempotent migration at startup gives cards without a number one, and turns the old single `assigneeEmail` into `assigneeEmails`.
 
 ## UI
 
@@ -106,7 +111,9 @@ Card order is a number. A dropped card gets the midpoint between its new neighbo
 flowchart TD
   H["Home<br/>workspace tiles"] --> W["Workspace<br/>projects + source links"]
   W --> P["Board<br/>5 columns · drag & drop · filters · quick add · 15s refresh"]
-  P --> C["Card drawer<br/>fields · checklist · comments · history"]
+  P --> C["Card drawer<br/>fields · delay · estimate · labels · checklist · comments · history<br/>duplicate · make into project"]
+  H -.-> K["Calendar<br/>Timeline · Month · Week · hour totals"]
+  K --> C
   H -.-> S["Search"]
   H -.-> A["Admin<br/>People & access · Workspaces & Teams · API keys · Activity log"]
 ```

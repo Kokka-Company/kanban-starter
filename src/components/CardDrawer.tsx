@@ -1,13 +1,17 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { ChevronDown, History as HistoryIcon, Trash2, X } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { AlertTriangle, ArrowRight, ChevronDown, Copy, FolderPlus, History as HistoryIcon, Trash2, X } from 'lucide-react'
 import {
   api,
   COLUMNS,
   COLUMN_LABELS,
   errorMessage,
+  formatHours,
   isOverdue,
+  plannedFrom,
   timeAgo,
   type Card,
+  type CardPatch,
   type ChecklistItem,
   type Column,
   type Comment,
@@ -16,9 +20,10 @@ import {
 } from '../lib/api'
 import { useMe } from '../lib/me'
 import { Avatar, ErrorNote, Spinner } from './ui'
+import { LabelPicker, PeoplePicker } from './pickers'
 import ActivityRow from './ActivityRow'
 
-type Patch = Parameters<typeof api.updateCard>[1]
+type ChildProject = { id: string; name: string; cardCount: number; doneCount: number }
 
 /**
  * The card side panel. Every field saves on its own (on change or on blur), so there
@@ -30,30 +35,41 @@ export default function CardDrawer({
   onClose,
   onChange,
   onDelete,
+  onDuplicated,
 }: {
   cardId: string
   people: Person[]
   onClose: () => void
   onChange: (card: Card) => void
   onDelete: (id: string) => void
+  /** A copy was made (#1); the panel switches to it. */
+  onDuplicated?: (card: Card) => void
 }) {
   const { me } = useMe()
   const [card, setCard] = useState<Card | null>(null)
   const [comments, setComments] = useState<Comment[]>([])
+  const [childProject, setChildProject] = useState<ChildProject | null>(null)
   const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
+  const [estimate, setEstimate] = useState('')
+  const [delayReason, setDelayReason] = useState('')
+  const [askingDelay, setAskingDelay] = useState(false)
+
+  const load = async (id: string) => {
+    const r = await api.card(id)
+    setCard(r.card)
+    setTitle(r.card.title)
+    setDescription(r.card.description)
+    setEstimate(r.card.estimateHours === null ? '' : String(r.card.estimateHours))
+    setDelayReason(r.card.delayReason)
+    setComments(r.comments)
+    setChildProject(r.childProject)
+  }
 
   useEffect(() => {
-    api
-      .card(cardId)
-      .then((r) => {
-        setCard(r.card)
-        setTitle(r.card.title)
-        setDescription(r.card.description)
-        setComments(r.comments)
-      })
-      .catch((err) => setError(errorMessage(err, 'Could not load the card.')))
+    load(cardId).catch((err) => setError(errorMessage(err, 'Could not load the card.')))
   }, [cardId])
 
   useEffect(() => {
@@ -62,7 +78,7 @@ export default function CardDrawer({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  const save = async (patch: Patch) => {
+  const save = async (patch: CardPatch) => {
     if (!card) return
     const previous = card
     setCard({ ...card, ...patch } as Card)
@@ -70,22 +86,61 @@ export default function CardDrawer({
     try {
       const { card: saved } = await api.updateCard(card.id, patch)
       setCard(saved)
+      setDelayReason(saved.delayReason)
       onChange(saved)
+      return true
     } catch (err) {
       setCard(previous)
       setError(errorMessage(err, 'Could not save.'))
+      return false
+    }
+  }
+
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true)
+    setError('')
+    try {
+      await fn()
+    } catch (err) {
+      setError(errorMessage(err))
+    } finally {
+      setBusy(false)
     }
   }
 
   const remove = async () => {
     if (!card || !window.confirm('Delete this card and its comments?')) return
-    try {
+    await run(async () => {
       await api.deleteCard(card.id)
       onDelete(card.id)
-    } catch (err) {
-      setError(errorMessage(err, 'Could not delete the card.'))
-    }
+    })
   }
+
+  const duplicate = () =>
+    run(async () => {
+      if (!card) return
+      const { card: copy } = await api.duplicateCard(card.id)
+      onDuplicated?.(copy)
+    })
+
+  const convert = () => {
+    if (!card) return
+    const n = card.checklist.length
+    const msg = `Turn "${card.title}" into its own project?\n\n${n ? `Its ${n} checklist item${n === 1 ? '' : 's'} become${n === 1 ? 's' : ''} tasks in the new project. ` : ''}This task stays here, linked to the project.`
+    if (!window.confirm(msg)) return
+    void run(async () => {
+      const r = await api.convertCard(card.id)
+      setCard(r.card)
+      onChange(r.card)
+      setChildProject({ id: r.project.id, name: r.project.name, cardCount: r.cards.length, doneCount: r.cards.filter((c) => c.column === 'done').length })
+    })
+  }
+
+  const planned = useMemo(() => {
+    const n = Number(estimate)
+    return estimate.trim() && Number.isFinite(n) && n > 0 ? plannedFrom(n, me.estimateBuffer) : null
+  }, [estimate, me.estimateBuffer])
+  const bufferPct = Math.round((me.estimateBuffer - 1) * 100)
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
@@ -94,13 +149,31 @@ export default function CardDrawer({
         onClick={(e) => e.stopPropagation()}
         aria-label="Card details"
       >
-        <div className="flex items-center justify-between border-b border-line px-5 py-3">
-          <span className="text-xs uppercase tracking-wide text-fg-subtle">Card</span>
-          <div className="flex items-center gap-1">
+        <div className="flex items-center justify-between gap-2 border-b border-line px-5 py-3">
+          {/* #7: task number and when it was added, small. */}
+          <span className="min-w-0 truncate font-mono text-[11px] uppercase tracking-wider text-fg-subtle">
+            {card?.key ?? 'Card'}
+            {card && (
+              <span className="normal-case tracking-normal text-fg-subtle">
+                {' '}· Added {new Date(card.createdBy.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} by {card.createdBy.label}
+              </span>
+            )}
+          </span>
+          <div className="flex shrink-0 items-center gap-1">
             {card && me.canEdit && (
-              <button className="btn-danger p-2" onClick={() => void remove()} title="Delete card">
-                <Trash2 className="h-4 w-4" />
-              </button>
+              <>
+                <button className="btn-ghost p-2" onClick={() => void duplicate()} disabled={busy} title="Duplicate task">
+                  <Copy className="h-4 w-4" />
+                </button>
+                {!card.childProjectId && (
+                  <button className="btn-ghost p-2" onClick={convert} disabled={busy} title="Make into a project">
+                    <FolderPlus className="h-4 w-4" />
+                  </button>
+                )}
+                <button className="btn-danger p-2" onClick={() => void remove()} disabled={busy} title="Delete task">
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </>
             )}
             <button className="btn-ghost p-2" onClick={onClose} title="Close (Esc)">
               <X className="h-4 w-4" />
@@ -126,6 +199,64 @@ export default function CardDrawer({
 
             <ErrorNote message={error} />
 
+            {childProject && (
+              <Link
+                to={`/p/${childProject.id}`}
+                className="flex items-center gap-3 border border-accent/40 bg-accent/5 px-4 py-3 text-sm hover:border-accent/60"
+              >
+                <FolderPlus className="h-4 w-4 shrink-0 text-accent" />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-xs text-fg-subtle">Became a project</span>
+                  <span className="block truncate text-fg">{childProject.name}</span>
+                </span>
+                <span className="font-mono text-xs text-fg-muted">{childProject.doneCount}/{childProject.cardCount} done</span>
+                <ArrowRight className="h-4 w-4 text-accent" />
+              </Link>
+            )}
+
+            {/* #3 Delayed */}
+            {card.delayed ? (
+              <div className="space-y-2 border border-amber-400/50 bg-amber-50 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-2 text-sm font-medium text-amber-800">
+                    <AlertTriangle className="h-4 w-4" /> Delayed
+                  </span>
+                  <button type="button" className="btn-ghost py-1 text-xs" onClick={() => void save({ delayed: false })}>
+                    Clear delay
+                  </button>
+                </div>
+                <textarea
+                  className="input min-h-16 border-amber-400/30"
+                  rows={2}
+                  aria-label="Reason for the delay"
+                  value={delayReason}
+                  onChange={(e) => setDelayReason(e.target.value)}
+                  onBlur={() => delayReason.trim() && delayReason.trim() !== card.delayReason && void save({ delayReason: delayReason.trim() })}
+                />
+              </div>
+            ) : askingDelay ? (
+              <form
+                className="space-y-2 border border-amber-400/40 bg-amber-50 p-4"
+                onSubmit={async (e) => {
+                  e.preventDefault()
+                  if (await save({ delayed: true, delayReason: delayReason.trim() })) setAskingDelay(false)
+                }}
+              >
+                <label className="label" htmlFor="cd-delay">Why is it delayed?</label>
+                <textarea id="cd-delay" autoFocus className="input min-h-16" rows={2} value={delayReason} onChange={(e) => setDelayReason(e.target.value)} />
+                <div className="flex gap-2">
+                  <button className="btn bg-amber-500 text-fg hover:bg-amber-600" disabled={!delayReason.trim()}>Mark delayed</button>
+                  <button type="button" className="btn-ghost" onClick={() => setAskingDelay(false)}>Cancel</button>
+                </div>
+              </form>
+            ) : (
+              me.canEdit && (
+                <button type="button" className="inline-flex items-center gap-1.5 text-xs text-fg-subtle hover:text-amber-700" onClick={() => setAskingDelay(true)}>
+                  <AlertTriangle className="h-3.5 w-3.5" /> Mark as delayed
+                </button>
+              )
+            )}
+
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
                 <label className="label" htmlFor="cd-col">Column</label>
@@ -136,29 +267,68 @@ export default function CardDrawer({
                 </select>
               </div>
               <div>
-                <label className="label" htmlFor="cd-who">Assignee</label>
-                <select
-                  id="cd-who"
+                <label className="label" htmlFor="cd-start">Start</label>
+                <input
+                  id="cd-start"
+                  type="date"
                   className="input"
-                  value={card.assigneeEmail || ''}
-                  onChange={(e) => void save({ assigneeEmail: e.target.value || null })}
-                >
-                  <option value="">Unassigned</option>
-                  {people.map((p) => (
-                    <option key={p.email} value={p.email}>{p.name}</option>
-                  ))}
-                </select>
+                  value={card.startDate || ''}
+                  max={card.dueDate || undefined}
+                  onChange={(e) => void save({ startDate: e.target.value || null })}
+                />
               </div>
               <div>
-                <label className="label" htmlFor="cd-due">Due date</label>
+                <label className="label" htmlFor="cd-due">Due</label>
                 <input
                   id="cd-due"
                   type="date"
                   className={`input ${isOverdue(card) ? 'border-red-400 text-red-700' : ''}`}
                   value={card.dueDate || ''}
+                  min={card.startDate || undefined}
                   onChange={(e) => void save({ dueDate: e.target.value || null })}
                 />
               </div>
+            </div>
+
+            <div>
+              <span className="label">Assignees</span>
+              <PeoplePicker value={card.assigneeEmails} people={people} disabled={!me.canEdit} onChange={(assigneeEmails) => void save({ assigneeEmails })} />
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-[10rem_1fr]">
+              <div>
+                <label className="label" htmlFor="cd-est">Estimate (hours)</label>
+                <input
+                  id="cd-est"
+                  type="number"
+                  min="0"
+                  step="0.25"
+                  inputMode="decimal"
+                  className="input"
+                  placeholder="Your guess"
+                  value={estimate}
+                  onChange={(e) => setEstimate(e.target.value)}
+                  onBlur={() => {
+                    const next = estimate.trim() ? Number(estimate) : null
+                    if (next !== card.estimateHours) void save({ estimateHours: next })
+                  }}
+                />
+              </div>
+              <div className="flex items-end pb-2 text-sm text-fg-subtle">
+                {planned !== null ? (
+                  <span>
+                    → <span className="font-mono text-fg">{formatHours(planned)}</span> planned{' '}
+                    <span className="text-xs text-fg-subtle">(guess +{bufferPct}%)</span>
+                  </span>
+                ) : (
+                  <span className="text-xs text-fg-subtle">Planned hours add {bufferPct}% to your guess.</span>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <span className="label">Labels</span>
+              <LabelPicker value={card.labelIds} disabled={!me.canEdit} onChange={(labelIds) => void save({ labelIds })} />
             </div>
 
             <div>

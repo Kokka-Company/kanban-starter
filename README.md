@@ -4,8 +4,24 @@ A simple, private kanban board for small companies. It has the parts of Jira peo
 
 **Workspaces → Projects → Board.** Every board has five fixed columns: Backlog, To Do, Doing, Review, Done.
 
-- **Cards:** title, description, assignee, due date, checklist, and comments with @mentions.
-- **Finding cards:** search across every board, plus filters on each board (by assignee, overdue, or text).
+- **Tasks:**
+  - Jira-style numbers, e.g. `ENG-12`.
+  - Several assignees, start and due dates, and an estimate in hours. A +30% buffer is added automatically, e.g. "10h guess → 13h planned".
+  - A checklist, and comments with @mentions.
+  - A **Delayed** flag with a reason, which turns the card yellow.
+- **Task actions:**
+  - **Duplicate** a task.
+  - **Turn a task into a project** when its scope grows: the checklist becomes the new project's tasks, and the original stays as the linked parent.
+- **Labels:** one shared list (clients, R&D, …) on projects and tasks, like Jira epics. Pull everything for a label across projects with `GET /api/v1/cards?labelId=…`, e.g. for billing or a CRM.
+- **Projects:** a due date, or **Ongoing** for no end date. Members can create and edit projects in their own workspaces.
+- **Calendar**, with three views over the same tasks:
+  - **Timeline:** bars per person.
+  - **Month.**
+  - **Week:** a board of days.
+  Drag to reschedule, and the project board follows. Filter by person, workspace and label, with planned-hour totals per person and overall.
+- **Finding tasks:**
+  - Search across every board, including by task key.
+  - On each board: avatar circles to filter by person, plus label, overdue, delayed and text filters.
 - **Sign-in and access:** people sign in with Microsoft, and each person sees only the workspaces they're given.
 - **Roles:** Admin, Member and Viewer. You can also limit editing to your company's email domain.
 - **REST API for AI agents and scripts:** keys have a permission level (read-only, cards & comments, or admin), optional workspace limits and an expiry date.
@@ -36,7 +52,7 @@ cp api/local.settings.json.example api/local.settings.json   # set KANBAN_ADMIN_
 
 npm run dev:api     # API on http://localhost:7072, data in api/.local-data.json
 npm run dev         # app on http://localhost:5174
-npm run test:api    # 30 end-to-end API checks: access control, keys, logging, sessions
+npm run test:api    # 40 end-to-end API checks: access control, keys, logging, sessions, numbering, calendar
 ```
 
 To act as someone else from curl, send `x-dev-user: their@email`. The dev server is never deployed, so this shortcut doesn't exist in production.
@@ -87,6 +103,7 @@ Azure issues the HTTPS certificate automatically. See [Custom domains with Azure
 | `KANBAN_PUBLIC_URL` | The site's address. Used for "Open card" links in Teams posts. |
 | `KANBAN_SESSION_SECRET` | 32+ random characters that sign the session pass. The provision script generates it. |
 | `COSMOS_ENDPOINT`, `COSMOS_KEY`, `COSMOS_DATABASE` | The database. Leave empty locally to use the JSON file store instead. |
+| `KANBAN_ESTIMATE_BUFFER` | Multiplier on estimates. Default `1.3` (+30%). |
 | `VITE_APP_NAME` | Build-time. The name in the header. Default: `Kanban`. |
 
 ### Teams notifications
@@ -101,12 +118,13 @@ For each workspace:
 - **Logo and name:** replace [`public/favicon.svg`](public/favicon.svg) and set `VITE_APP_NAME`.
 - **Workspace logos:** [`src/components/WorkspaceMark.tsx`](src/components/WorkspaceMark.tsx) shows each workspace's initial. Swap in real logos there.
 - **Column colours:** the `COLUMN_COLORS` greys in [`src/components/Board.tsx`](src/components/Board.tsx).
+- **Label colours:** `LABEL_STYLES` in [`src/lib/labels.ts`](src/lib/labels.ts). These are grey placeholders; each label still stores a colour name.
 
 ## Project layout
 
 ```
 src/                 React app (Vite + Tailwind)
-  pages/             Home, Workspace, Project (board), Search, Admin
+  pages/             Home, Workspace, Project (board), Calendar, Search, Admin
   components/        Board (drag & drop), CardDrawer, ActivityRow, Layout, …
   lib/api.ts         Typed client for the API
 api/                 Azure Functions (Node 20)

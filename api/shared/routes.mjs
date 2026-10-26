@@ -21,6 +21,11 @@ export const ROUTES = [
   ['GET', 'workspaces/{id}/projects', h.listProjects],
   ['POST', 'workspaces/{id}/projects', h.createProject],
 
+  ['GET', 'labels', h.listLabels],
+  ['POST', 'labels', h.createLabel],
+  ['PATCH', 'labels/{id}', h.updateLabel],
+  ['DELETE', 'labels/{id}', h.deleteLabel],
+
   ['GET', 'projects/{id}', h.getProject],
   ['PATCH', 'projects/{id}', h.updateProject],
   ['DELETE', 'projects/{id}', h.deleteProject],
@@ -30,11 +35,15 @@ export const ROUTES = [
   ['GET', 'cards/{id}', h.getCard],
   ['PATCH', 'cards/{id}', h.updateCard],
   ['DELETE', 'cards/{id}', h.deleteCard],
+  ['POST', 'cards/{id}/duplicate', h.duplicateCard],
+  ['POST', 'cards/{id}/convert', h.convertCard],
+  ['GET', 'cards', h.queryCards],
   ['GET', 'cards/{id}/comments', h.listComments],
   ['POST', 'cards/{id}/comments', h.createComment],
   ['DELETE', 'comments/{id}', h.deleteComment],
 
   ['GET', 'search', h.search],
+  ['GET', 'calendar', h.calendar],
 
   ['GET', 'members', h.listMembers],
   ['POST', 'members', h.createMember],
@@ -63,6 +72,7 @@ export async function runRoute(route, { params, query, headers, rawBody, env, lo
   try {
     const store = await getStore(env)
     await h.ensureSeed(store, env)
+    await h.ensureMigrations(store)
 
     const auth = await authorize(headers, store, env, { devUser, channel })
     if (!auth.ok) {

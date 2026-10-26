@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
-import { api, ApiError, type Me } from './lib/api'
+import { api, ApiError, type Label, type LabelColor, type Me } from './lib/api'
+import { LabelsContext } from './lib/labels'
 import { MeContext } from './lib/me'
 import Layout from './components/Layout'
 import HomePage from './pages/HomePage'
@@ -8,7 +9,27 @@ import WorkspacePage from './pages/WorkspacePage'
 import ProjectPage from './pages/ProjectPage'
 import SearchPage from './pages/SearchPage'
 import AdminPage from './pages/AdminPage'
+import CalendarPage from './pages/CalendarPage'
 import { CenteredMessage, Spinner } from './components/ui'
+
+/** Loads the shared label list once; pickers call reload() after creating one. */
+function LabelsProvider({ children }: { children: ReactNode }) {
+  const [labels, setLabels] = useState<Label[]>([])
+  const [colors, setColors] = useState<LabelColor[]>([])
+  const reload = useCallback(async () => {
+    try {
+      const r = await api.labels()
+      setLabels(r.labels)
+      setColors(r.colors)
+    } catch {
+      // Labels are decoration; a failed load just shows none until the next try.
+    }
+  }, [])
+  useEffect(() => {
+    void reload()
+  }, [reload])
+  return <LabelsContext.Provider value={{ labels, colors, reload }}>{children}</LabelsContext.Provider>
+}
 
 const REDIRECT_KEY = 'kanban.loginRedirectAt'
 
@@ -100,6 +121,7 @@ export default function App() {
 
   return (
     <MeContext.Provider value={{ me, reload: load }}>
+      <LabelsProvider>
       <BrowserRouter>
         <Layout>
           <Routes>
@@ -107,11 +129,13 @@ export default function App() {
             <Route path="/w/:workspaceId" element={<WorkspacePage />} />
             <Route path="/p/:projectId" element={<ProjectPage />} />
             <Route path="/search" element={<SearchPage />} />
+            <Route path="/calendar" element={<CalendarPage />} />
             {me.isAdmin && <Route path="/admin" element={<AdminPage />} />}
             <Route path="*" element={<CenteredMessage title="Page not found" />} />
           </Routes>
         </Layout>
       </BrowserRouter>
+      </LabelsProvider>
     </MeContext.Provider>
   )
 }

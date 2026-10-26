@@ -14,9 +14,9 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { CalendarDays, CheckSquare, MessageSquare, Plus } from 'lucide-react'
-import { COLUMNS, COLUMN_LABELS, formatDue, isOverdue, type Card, type Column, type Person } from '../lib/api'
-import { Avatar } from './ui'
+import { AlertTriangle, CalendarDays, CheckSquare, Clock, MessageSquare, Plus } from 'lucide-react'
+import { COLUMNS, COLUMN_LABELS, formatDue, formatHours, isOverdue, type Card, type Column, type Person } from '../lib/api'
+import { AvatarStack, LabelChips } from './pickers'
 
 type Lanes = Record<Column, string[]>
 
@@ -65,7 +65,6 @@ export default function Board({
   onCreate: (column: Column, title: string) => Promise<void>
 }) {
   const byId = useMemo(() => Object.fromEntries(cards.map((c) => [c.id, c])), [cards])
-  const nameOf = useMemo(() => Object.fromEntries(people.map((p) => [p.email, p.name])), [people])
   const settled = useMemo(() => lanesFrom(cards), [cards])
   const [dragLanes, setDragLanes] = useState<Lanes | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
@@ -159,7 +158,7 @@ export default function Board({
             <SortableContext items={lanes[col]} strategy={verticalListSortingStrategy}>
               {lanes[col].map((id) =>
                 byId[id] ? (
-                  <SortableCard key={id} card={byId[id]} assigneeName={nameOf[byId[id].assigneeEmail || ''] || byId[id].assigneeEmail || ''} onOpen={onOpen} />
+                  <SortableCard key={id} card={byId[id]} people={people} onOpen={onOpen} />
                 ) : null,
               )}
             </SortableContext>
@@ -167,7 +166,7 @@ export default function Board({
         ))}
       </div>
       <DragOverlay>
-        {active ? <CardTile card={active} assigneeName={nameOf[active.assigneeEmail || ''] || ''} dragging /> : null}
+        {active ? <CardTile card={active} people={people} dragging /> : null}
       </DragOverlay>
     </DndContext>
   )
@@ -251,7 +250,7 @@ function Lane({
   )
 }
 
-function SortableCard({ card, assigneeName, onOpen }: { card: Card; assigneeName: string; onOpen: (id: string) => void }) {
+function SortableCard({ card, people, onOpen }: { card: Card; people: Person[]; onOpen: (id: string) => void }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: card.id })
   return (
     <div
@@ -266,42 +265,63 @@ function SortableCard({ card, assigneeName, onOpen }: { card: Card; assigneeName
         if (e.key === 'Enter') onOpen(card.id)
       }}
     >
-      <CardTile card={card} assigneeName={assigneeName} />
+      <CardTile card={card} people={people} />
     </div>
   )
 }
 
-function CardTile({ card, assigneeName, dragging = false }: { card: Card; assigneeName: string; dragging?: boolean }) {
+/** One task on a board or calendar. Delayed tasks (#3) are yellow; overdue dates are red. */
+export function CardTile({ card, people, dragging = false, compact = false }: { card: Card; people: Person[]; dragging?: boolean; compact?: boolean }) {
   const done = card.checklist.filter((i) => i.done).length
   const overdue = isOverdue(card)
+  const tone = card.delayed
+    ? 'border-amber-400/60 bg-amber-50 hover:border-amber-500'
+    : 'border-line bg-surface hover:border-accent/50 hover:bg-surface hover:shadow-md'
+  const hasMeta =
+    card.dueDate || card.checklist.length > 0 || card.commentCount > 0 || card.assigneeEmails.length > 0 || card.plannedHours
   return (
-    <article
-      className={`cursor-pointer border border-line bg-surface p-3 text-sm transition duration-200 hover:border-accent/50 hover:bg-surface hover:shadow-md ${dragging ? 'rotate-2 border-accent/60 shadow-md' : ''}`}
-    >
+    <article className={`cursor-pointer border p-3 text-sm transition duration-200 ${tone} ${dragging ? 'rotate-2 border-accent/60 shadow-md' : ''}`}>
+      {(card.key || card.delayed) && (
+        <div className="mb-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+          {card.key && <span>{card.key}</span>}
+          {card.delayed && (
+            <span className="inline-flex items-center gap-1 text-amber-700" title={card.delayReason}>
+              <AlertTriangle className="h-3 w-3" /> Delayed
+            </span>
+          )}
+        </div>
+      )}
       <p className={`whitespace-pre-wrap break-words ${card.column === 'done' ? 'text-fg-subtle line-through' : 'text-fg'}`}>{card.title}</p>
-      {(card.dueDate || card.checklist.length > 0 || card.commentCount > 0 || card.assigneeEmail) && (
-        <div className="mt-2.5 flex items-center gap-3 font-mono text-[11px] text-fg-subtle">
+      {!compact && <LabelChips ids={card.labelIds} className="mt-2" />}
+      {hasMeta && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 whitespace-nowrap font-mono text-[11px] text-fg-subtle">
           {card.dueDate && (
             <span className={`flex items-center gap-1 ${overdue ? 'font-medium text-red-600' : ''}`} title={overdue ? 'Overdue' : 'Due'}>
               <CalendarDays className="h-3.5 w-3.5" />
               {formatDue(card.dueDate)}
             </span>
           )}
-          {card.checklist.length > 0 && (
+          {card.plannedHours !== null && (
+            <span className="flex items-center gap-1" title={`Guess ${formatHours(card.estimateHours)}, planned with buffer ${formatHours(card.plannedHours)}`}>
+              <Clock className="h-3.5 w-3.5" />
+              {formatHours(card.plannedHours)}
+            </span>
+          )}
+          {!compact && card.checklist.length > 0 && (
             <span className={`flex items-center gap-1 ${done === card.checklist.length ? 'text-emerald-600' : ''}`}>
               <CheckSquare className="h-3.5 w-3.5" />
               {done}/{card.checklist.length}
             </span>
           )}
-          {card.commentCount > 0 && (
+          {!compact && card.commentCount > 0 && (
             <span className="flex items-center gap-1">
               <MessageSquare className="h-3.5 w-3.5" />
               {card.commentCount}
             </span>
           )}
-          {card.assigneeEmail && (
+          {card.assigneeEmails.length > 0 && (
             <span className="ml-auto">
-              <Avatar name={assigneeName || card.assigneeEmail} />
+              <AvatarStack emails={card.assigneeEmails} people={people} />
             </span>
           )}
         </div>

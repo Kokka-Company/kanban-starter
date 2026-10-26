@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { Github, Plus } from 'lucide-react'
+import { ArrowLeft, Github, Plus } from 'lucide-react'
 import { api, errorMessage, type Workspace, type Project } from '../lib/api'
 import { useMe } from '../lib/me'
 import { useAutoRefresh } from '../lib/useAutoRefresh'
 import { ErrorNote, PageHeader, Spinner } from '../components/ui'
 import WorkspaceMark from '../components/WorkspaceMark'
+import { LabelChips, LabelPicker } from '../components/pickers'
+import { ProjectDueBadge, ProjectDueField } from '../components/ProjectDue'
 
-/** `/w/:workspaceId` — the workspace's projects. Only admins can create them. */
+/** `/w/:workspaceId` — the workspace's projects. Anyone who can edit (members included) can create them. */
 export default function WorkspacePage() {
   const { workspaceId = '' } = useParams()
   const { me } = useMe()
@@ -42,6 +44,10 @@ export default function WorkspacePage() {
 
   return (
     <>
+      {/* #6: back to all workspaces. */}
+      <Link to="/" className="btn-ghost -ml-3 mb-2 px-3 py-1.5">
+        <ArrowLeft className="h-4 w-4" /> Workspaces
+      </Link>
       <PageHeader
         title={workspace.name}
         mark={<WorkspaceMark id={workspace.id} name={workspace.name} size={48} />}
@@ -52,7 +58,7 @@ export default function WorkspacePage() {
               <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
               Show archived
             </label>
-            {me.isAdmin && !creating && (
+            {me.canEdit && !creating && (
               <button className="btn-primary" onClick={() => setCreating(true)}>
                 <Plus className="h-4 w-4" /> New project
               </button>
@@ -73,7 +79,7 @@ export default function WorkspacePage() {
 
       {projects.length === 0 ? (
         <p className="text-fg-subtle">
-          No projects yet.{me.isAdmin ? ' Create the first one.' : ' An admin can create one.'}
+          No projects yet.{me.canEdit ? ' Create the first one.' : ''}
         </p>
       ) : (
         <ul className="divide-y divide-line glass">
@@ -85,6 +91,12 @@ export default function WorkspacePage() {
                   {p.archived && <span className="bg-muted px-1.5 text-xs text-fg-muted">Archived</span>}
                 </div>
                 {p.description && <p className="mt-0.5 truncate text-sm text-fg-subtle">{p.description}</p>}
+                {(p.dueDate || p.ongoing || p.labelIds.length > 0) && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-3">
+                    <ProjectDueBadge dueDate={p.dueDate} ongoing={p.ongoing} />
+                    <LabelChips ids={p.labelIds} />
+                  </div>
+                )}
               </Link>
               <span className="shrink-0 text-sm text-fg-subtle">
                 <span className="font-mono text-xs"><span className="text-accent">{p.openCount ?? 0}</span> open · {p.cardCount ?? 0} total</span>
@@ -106,6 +118,8 @@ function NewProjectForm({ workspaceId, onDone }: { workspaceId: string; onDone: 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [repoUrl, setRepoUrl] = useState('')
+  const [due, setDue] = useState<{ dueDate: string | null; ongoing: boolean }>({ dueDate: null, ongoing: false })
+  const [labelIds, setLabelIds] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -114,7 +128,7 @@ function NewProjectForm({ workspaceId, onDone }: { workspaceId: string; onDone: 
     setBusy(true)
     setError('')
     try {
-      await api.createProject(workspaceId, { name, description, repoUrl })
+      await api.createProject(workspaceId, { name, description, repoUrl, ...due, labelIds })
       onDone()
     } catch (err) {
       setError(errorMessage(err, 'Could not create the project.'))
@@ -131,6 +145,11 @@ function NewProjectForm({ workspaceId, onDone }: { workspaceId: string; onDone: 
       <div>
         <label className="label" htmlFor="np-repo">GitHub / source link</label>
         <input id="np-repo" className="input" type="url" placeholder="https://github.com/…" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+      </div>
+      <ProjectDueField idPrefix="np" dueDate={due.dueDate} ongoing={due.ongoing} onChange={setDue} />
+      <div>
+        <span className="label">Labels</span>
+        <LabelPicker value={labelIds} onChange={setLabelIds} />
       </div>
       <div className="sm:col-span-2">
         <label className="label" htmlFor="np-desc">Description</label>

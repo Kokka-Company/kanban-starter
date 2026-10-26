@@ -134,6 +134,17 @@ function requireEdit(actor) {
   if (!actor.canEdit) throw new HttpError(403, 'read_only', 'You have view-only access')
 }
 
+/**
+ * Projects: any signed-in editor (members included, #2) in their own workspaces. A
+ * "Cards & comments" key promises it can't touch projects, so keys need the admin scope.
+ */
+function requireProjectEdit(actor) {
+  requireEdit(actor)
+  if (actor.type === 'key' && !actor.isAdmin) {
+    throw new HttpError(403, 'admin_key_only', 'This key can change cards and comments only; projects need an admin key')
+  }
+}
+
 // --- loaders that enforce access ------------------------------------------------
 
 async function loadWorkspace(store, actor, id) {
@@ -180,7 +191,7 @@ async function nextOrder(store, projectId, col) {
 
 const short = (s, n = 300) => (s && s.length > n ? `${s.slice(0, n)}…` : s)
 
-// --- seed -----------------------------------------------------------------------
+// --- seed & migrations ------------------------------------------------------------
 
 /**
  * Workspaces created on first start, from KANBAN_SEED_WORKSPACES (comma-separated
@@ -191,7 +202,12 @@ export function seedWorkspaces(env) {
     .split(',')
     .map((n) => n.trim())
     .filter(Boolean)
-  return names.map((name) => ({ id: slug(name) || randomUUID(), name }))
+  const taken = new Set()
+  return names.map((name) => {
+    const prefix = defaultPrefix(name, taken)
+    taken.add(prefix)
+    return { id: slug(name) || randomUUID(), name, prefix }
+  })
 }
 
 let seeded = false
@@ -203,6 +219,90 @@ export async function ensureSeed(store, env) {
     for (const w of seedWorkspaces(env)) await store.put('workspaces', { ...w, teamsWebhookUrl: '', createdAt: now })
   }
   seeded = true
+}
+
+/** "Engineering Ops" → "EO", "Research & Development" → "RD"; made unique against `taken`. */
+export function defaultPrefix(name, taken = new Set()) {
+  const words = name.replace(/&/g, ' ').split(/[^A-Za-z0-9]+/).filter((w) => w && !/^(and|of|the)$/i.test(w))
+  let base = words.map((w) => w[0]).join('').toUpperCase().slice(0, 5)
+  if (base.length < 2) base = name.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 3) || 'WS'
+  let prefix = base
+  for (let i = 2; taken.has(prefix); i++) prefix = `${base.slice(0, 4)}${i}`
+  return prefix
+}
+
+/**
+ * One-off upgrades for records made before task numbers, multiple assignees and
+ * workspace prefixes existed. Idempotent; runs once per process. Numbers come from the
+ * same atomic counter new cards use, so nothing can get a duplicate number.
+ */
+let migrated = false
+export async function ensureMigrations(store, { force = false } = {}) {
+  if (migrated && !force) return
+  const workspaces = await store.find('workspaces')
+  const taken = new Set(workspaces.map((a) => a.prefix).filter(Boolean))
+  for (const a of workspaces) {
+    if (a.prefix) continue
+    const prefix = defaultPrefix(a.name, taken)
+    taken.add(prefix)
+    await store.put('workspaces', { ...a, prefix })
+  }
+  const cards = await store.find('cards')
+  const unnumbered = cards
+    .filter((c) => !c.number)
+    .sort((a, b) => String(a.createdBy?.at || '').localeCompare(String(b.createdBy?.at || '')))
+  for (const c of unnumbered) {
+    await store.put('cards', normalizeCard({ ...c, number: await store.increment(counterId(c.workspaceId)) }))
+  }
+  for (const c of cards) {
+    if (c.number && 'assigneeEmail' in c) await store.put('cards', normalizeCard(c))
+  }
+  migrated = true
+}
+
+const counterId = (workspaceId) => `task-${workspaceId}`
+
+// --- card shape -------------------------------------------------------------------
+
+/** Every card in the current shape: assignee list, labels, delay fields (old records predate them). */
+function normalizeCard(c) {
+  const { assigneeEmail, ...rest } = c
+  return {
+    ...rest,
+    assigneeEmails: Array.isArray(c.assigneeEmails) ? c.assigneeEmails : assigneeEmail ? [assigneeEmail] : [],
+    labelIds: Array.isArray(c.labelIds) ? c.labelIds : [],
+    startDate: c.startDate ?? null,
+    estimateHours: typeof c.estimateHours === 'number' ? c.estimateHours : null,
+    delayed: Boolean(c.delayed),
+    delayReason: c.delayReason || '',
+    childProjectId: c.childProjectId || null,
+  }
+}
+
+export function estimateBuffer(env) {
+  const f = Number(env.KANBAN_ESTIMATE_BUFFER)
+  return Number.isFinite(f) && f >= 1 && f <= 3 ? f : 1.3
+}
+
+/** The guess plus the buffer (+30% by default), to one decimal. */
+export function plannedHours(estimate, env) {
+  return typeof estimate === 'number' ? Math.round(estimate * estimateBuffer(env) * 10) / 10 : null
+}
+
+async function prefixMap(store) {
+  return Object.fromEntries((await store.find('workspaces')).map((a) => [a.id, a.prefix || '']))
+}
+
+/** A card as the API returns it: current shape, plus its key (ENG-12) and planned hours. */
+function presentCard(c, prefixes, env, extra = {}) {
+  const card = normalizeCard(c)
+  const prefix = prefixes[card.workspaceId]
+  return {
+    ...card,
+    key: card.number && prefix ? `${prefix}-${card.number}` : null,
+    plannedHours: plannedHours(card.estimateHours, env),
+    ...extra,
+  }
 }
 
 // --- me ---------------------------------------------------------------------------
@@ -217,6 +317,7 @@ export async function getMe({ actor, store, env }) {
     isAdmin: actor.isAdmin,
     canEdit: actor.canEdit,
     editDomains: editDomains(env),
+    estimateBuffer: estimateBuffer(env),
     workspaces: workspaces.map((a) => publicWorkspace(a, actor)).sort((a, b) => a.name.localeCompare(b.name)),
   })
 }
@@ -240,11 +341,13 @@ export async function createWorkspace({ actor, store, body }) {
   requireAdmin(actor)
   const name = text(body.name, 'name', { max: 80, required: true })
   const id = slug(name) || randomUUID()
-  if (await store.get('workspaces', id)) throw new HttpError(409, 'exists', 'An workspace with that name already exists')
-  const workspace = await store.put('workspaces', { id, name, teamsWebhookUrl: '', createdAt: new Date().toISOString() })
+  const all = await store.find('workspaces')
+  if (all.some((a) => a.id === id)) throw new HttpError(409, 'exists', 'An workspace with that name already exists')
+  const prefix = defaultPrefix(name, new Set(all.map((a) => a.prefix)))
+  const workspace = await store.put('workspaces', { id, name, prefix, teamsWebhookUrl: '', createdAt: new Date().toISOString() })
   return ok({ workspace: publicWorkspace(workspace, actor) }, 201, {
     action: 'workspace.create',
-    summary: `created workspace "${name}"`,
+    summary: `created workspace "${name}" (${prefix})`,
     workspaceId: id,
   })
 }
@@ -257,6 +360,16 @@ export async function updateWorkspace({ actor, store, params, body }) {
   if ('name' in body) {
     next.name = text(body.name, 'name', { max: 80, required: true })
     if (next.name !== workspace.name) changes.name = { from: workspace.name, to: next.name }
+  }
+  if ('prefix' in body) {
+    const prefix = text(body.prefix, 'prefix', { max: 5, required: true }).toUpperCase()
+    if (!/^[A-Z][A-Z0-9]{1,4}$/.test(prefix)) {
+      throw new HttpError(400, 'invalid_input', 'prefix must be 2–5 letters or digits, starting with a letter')
+    }
+    const clash = (await store.find('workspaces')).find((a) => a.id !== workspace.id && a.prefix === prefix)
+    if (clash) throw new HttpError(409, 'exists', `${clash.name} already uses ${prefix}`)
+    next.prefix = prefix
+    if (prefix !== workspace.prefix) changes.prefix = { from: workspace.prefix, to: prefix }
   }
   if ('teamsWebhookUrl' in body) {
     const url = text(body.teamsWebhookUrl, 'teamsWebhookUrl', { max: 2000 })
@@ -290,7 +403,92 @@ export async function listWorkspaceMembers({ actor, store, env, params }) {
   return ok({ members: await workspacePeople(store, env, workspace.id) })
 }
 
+// --- labels (shared across workspaces) -----------------------------------------------
+
+export const LABEL_COLORS = ['slate', 'blue', 'teal', 'green', 'amber', 'orange', 'red', 'pink', 'violet']
+
+async function validLabelIds(store, value) {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) throw new HttpError(400, 'invalid_input', 'labelIds must be an array')
+  const ids = [...new Set(value.map(String))]
+  if (!ids.length) return []
+  const known = new Set((await store.find('labels')).map((l) => l.id))
+  const bad = ids.filter((id) => !known.has(id))
+  if (bad.length) throw new HttpError(400, 'invalid_input', `Unknown labels: ${bad.join(', ')}`)
+  return ids
+}
+
+function labelColor(value) {
+  if (value === undefined) return 'slate'
+  if (!LABEL_COLORS.includes(value)) throw new HttpError(400, 'invalid_input', `color must be one of ${LABEL_COLORS.join(', ')}`)
+  return value
+}
+
+export async function listLabels({ store }) {
+  const labels = await store.find('labels')
+  return ok({ labels: labels.sort((a, b) => a.name.localeCompare(b.name)), colors: LABEL_COLORS })
+}
+
+export async function createLabel({ actor, store, body }) {
+  requireEdit(actor)
+  const name = text(body.name, 'name', { max: 60, required: true })
+  const all = await store.find('labels')
+  const clash = all.find((l) => l.name.toLowerCase() === name.toLowerCase())
+  if (clash) throw new HttpError(409, 'exists', `The label "${clash.name}" already exists`)
+  const label = await store.put('labels', { id: randomUUID(), name, color: labelColor(body.color), createdBy: stamp(actor) })
+  return ok({ label }, 201, { action: 'label.create', summary: `created label "${name}"` })
+}
+
+export async function updateLabel({ actor, store, params, body }) {
+  requireAdmin(actor)
+  const label = await store.get('labels', params.id)
+  if (!label) throw notFound('Label')
+  const next = { ...label }
+  if ('name' in body) {
+    next.name = text(body.name, 'name', { max: 60, required: true })
+    const clash = (await store.find('labels')).find((l) => l.id !== label.id && l.name.toLowerCase() === next.name.toLowerCase())
+    if (clash) throw new HttpError(409, 'exists', `The label "${clash.name}" already exists`)
+  }
+  if ('color' in body) next.color = labelColor(body.color)
+  const saved = await store.put('labels', next)
+  const changes = {}
+  for (const f of ['name', 'color']) if (saved[f] !== label[f]) changes[f] = { from: label[f], to: saved[f] }
+  return ok({ label: saved }, 200, { action: 'label.update', summary: `updated label "${saved.name}"`, changes })
+}
+
+export async function deleteLabel({ actor, store, params }) {
+  requireAdmin(actor)
+  const label = await store.get('labels', params.id)
+  if (!label) throw notFound('Label')
+  // Take it off everything that carries it, so no record points at a missing label.
+  const [projects, cards] = await Promise.all([
+    store.find('projects', { labelIds: { has: label.id } }),
+    store.find('cards', { labelIds: { has: label.id } }),
+  ])
+  for (const p of projects) await store.put('projects', { ...p, labelIds: p.labelIds.filter((id) => id !== label.id) })
+  for (const c of cards) await store.put('cards', { ...c, labelIds: c.labelIds.filter((id) => id !== label.id) })
+  await store.remove('labels', label)
+  return ok({ deleted: true, removedFrom: { projects: projects.length, cards: cards.length } }, 200, {
+    action: 'label.delete',
+    summary: `deleted label "${label.name}" (was on ${projects.length} project${projects.length === 1 ? '' : 's'} and ${cards.length} card${cards.length === 1 ? '' : 's'})`,
+  })
+}
+
 // --- projects -------------------------------------------------------------------
+
+/** Project due date (#12): a date, or `ongoing` for no end date. Setting one clears the other. */
+function projectDue(body, current = { dueDate: null, ongoing: false }) {
+  let { dueDate, ongoing } = current
+  if ('dueDate' in body) dueDate = optionalDate(body.dueDate, 'dueDate')
+  if ('ongoing' in body) ongoing = Boolean(body.ongoing)
+  if ('ongoing' in body && ongoing) dueDate = null
+  else if ('dueDate' in body && dueDate) ongoing = false
+  return { dueDate: dueDate ?? null, ongoing: Boolean(ongoing) }
+}
+
+function presentProject(p) {
+  return { ...p, dueDate: p.dueDate ?? null, ongoing: Boolean(p.ongoing), labelIds: p.labelIds || [], parentCardId: p.parentCardId || null }
+}
 
 export async function listProjects({ actor, store, params, query }) {
   const workspace = await loadWorkspace(store, actor, params.id)
@@ -302,14 +500,14 @@ export async function listProjects({ actor, store, params, query }) {
     projects: projects
       .map((p) => {
         const mine = cards.filter((c) => c.projectId === p.id)
-        return { ...p, cardCount: mine.length, openCount: mine.filter((c) => c.column !== 'done').length }
+        return { ...presentProject(p), cardCount: mine.length, openCount: mine.filter((c) => c.column !== 'done').length }
       })
       .sort((a, b) => a.name.localeCompare(b.name)),
   })
 }
 
 export async function createProject({ actor, store, params, body }) {
-  requireAdmin(actor)
+  requireProjectEdit(actor)
   const workspace = await loadWorkspace(store, actor, params.id)
   const project = await store.put('projects', {
     id: randomUUID(),
@@ -317,10 +515,12 @@ export async function createProject({ actor, store, params, body }) {
     name: text(body.name, 'name', { max: 120, required: true }),
     description: text(body.description, 'description', { max: 2000 }),
     repoUrl: optionalUrl(body.repoUrl, 'repoUrl'),
+    ...projectDue(body),
+    labelIds: (await validLabelIds(store, body.labelIds)) ?? [],
     archived: false,
     createdBy: stamp(actor),
   })
-  return ok({ project }, 201, {
+  return ok({ project: presentProject(project) }, 201, {
     action: 'project.create',
     summary: `created project "${project.name}"`,
     workspaceId: workspace.id,
@@ -331,35 +531,43 @@ export async function createProject({ actor, store, params, body }) {
 /** Everything the board screen needs in one round trip. */
 export async function getProject({ actor, store, env, params }) {
   const project = await loadProject(store, actor, params.id)
-  const [workspace, cards, members] = await Promise.all([
+  const [workspace, cards, members, parent] = await Promise.all([
     store.get('workspaces', project.workspaceId),
     store.find('cards', { projectId: project.id }),
     workspacePeople(store, env, project.workspaceId),
+    project.parentCardId ? store.get('cards', project.parentCardId) : null,
   ])
+  const prefixes = { [workspace.id]: workspace.prefix }
   return ok({
-    project,
+    project: presentProject(project),
     workspace: publicWorkspace(workspace, actor),
     columns: COLUMNS,
-    cards: cards.sort((a, b) => a.order - b.order),
+    cards: cards.sort((a, b) => a.order - b.order).map((c) => presentCard(c, prefixes, env)),
     members,
+    parentCard:
+      parent && canAccessWorkspace(actor, parent.workspaceId)
+        ? { id: parent.id, projectId: parent.projectId, title: parent.title, key: presentCard(parent, await prefixMap(store), env).key }
+        : null,
   })
 }
 
 export async function updateProject({ actor, store, params, body }) {
-  requireAdmin(actor)
-  const project = await loadProject(store, actor, params.id)
-  const next = { ...project }
+  requireProjectEdit(actor)
+  const project = presentProject(await loadProject(store, actor, params.id))
+  const next = { ...project, ...projectDue(body, project) }
   if ('name' in body) next.name = text(body.name, 'name', { max: 120, required: true })
   if ('description' in body) next.description = text(body.description, 'description', { max: 2000 })
   if ('repoUrl' in body) next.repoUrl = optionalUrl(body.repoUrl, 'repoUrl')
   if ('archived' in body) next.archived = Boolean(body.archived)
+  if ('labelIds' in body) next.labelIds = await validLabelIds(store, body.labelIds)
   const changes = {}
-  for (const f of ['name', 'description', 'repoUrl', 'archived']) {
+  for (const f of ['name', 'description', 'repoUrl', 'archived', 'dueDate', 'ongoing']) {
     if (next[f] !== project[f]) changes[f] = { from: short(project[f]), to: short(next[f]) }
   }
+  if (JSON.stringify(next.labelIds) !== JSON.stringify(project.labelIds)) changes.labelIds = { from: project.labelIds, to: next.labelIds }
   next.updatedBy = stamp(actor)
   const saved = await store.put('projects', next)
-  return ok({ project: saved }, 200, {
+  return ok({ project: presentProject(saved) }, 200, {
     action: 'project.update',
     summary: `updated project "${saved.name}"`,
     workspaceId: saved.workspaceId,
@@ -376,6 +584,11 @@ export async function deleteProject({ actor, store, params }) {
     for (const c of await store.find('comments', { cardId: card.id })) await store.remove('comments', c)
     await store.remove('cards', card)
   }
+  // A task that was turned into this project goes back to being a plain task.
+  if (project.parentCardId) {
+    const parent = await store.get('cards', project.parentCardId)
+    if (parent) await store.put('cards', { ...parent, childProjectId: null })
+  }
   await store.remove('projects', project)
   return ok({ deleted: true, cardsDeleted: cards.length }, 200, {
     action: 'project.delete',
@@ -387,71 +600,162 @@ export async function deleteProject({ actor, store, params }) {
 
 // --- cards ------------------------------------------------------------------------
 
-export async function listCards({ actor, store, params, query }) {
+export async function listCards({ actor, store, env, params, query }) {
   const project = await loadProject(store, actor, params.id)
   const where = { projectId: project.id }
   if (query.column) where.column = column(query.column)
-  if (query.assignee) where.assigneeEmail = String(query.assignee).toLowerCase()
-  const cards = await store.find('cards', where)
-  return ok({ cards: cards.sort((a, b) => a.order - b.order) })
+  let cards = (await store.find('cards', where)).map(normalizeCard)
+  if (query.assignee) cards = cards.filter((c) => c.assigneeEmails.includes(String(query.assignee).toLowerCase()))
+  const prefixes = await prefixMap(store)
+  return ok({ cards: cards.sort((a, b) => a.order - b.order).map((c) => presentCard(c, prefixes, env)) })
 }
 
-async function resolveAssignee(store, env, workspaceId, value) {
+/** Assignees (#4): a list of emails, each of whom must be able to see the workspace. Accepts the old single `assigneeEmail` too. */
+async function resolveAssignees(store, env, workspaceId, body) {
+  let raw
+  if ('assigneeEmails' in body) raw = body.assigneeEmails
+  else if ('assigneeEmail' in body) raw = body.assigneeEmail ? [body.assigneeEmail] : []
+  else return undefined
+  if (raw === null) raw = []
+  if (!Array.isArray(raw)) throw new HttpError(400, 'invalid_input', 'assigneeEmails must be an array')
+  if (raw.length > 10) throw new HttpError(400, 'invalid_input', 'A task can have at most 10 assignees')
+  const people = await workspacePeople(store, env, workspaceId)
+  const out = []
+  for (const value of raw) {
+    const addr = email(value, 'assigneeEmails')
+    const person = people.find((p) => p.email === addr)
+    if (!person) throw new HttpError(400, 'invalid_input', `${addr} does not have access to this workspace`)
+    if (!out.some((p) => p.email === addr)) out.push(person)
+  }
+  return out
+}
+
+function estimate(value) {
   if (value === null || value === '' || value === undefined) return null
-  const addr = email(value, 'assigneeEmail')
-  const person = (await workspacePeople(store, env, workspaceId)).find((p) => p.email === addr)
-  if (!person) throw new HttpError(400, 'invalid_input', `${addr} does not have access to this workspace`)
-  return person
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0 || n > 1000) throw new HttpError(400, 'invalid_input', 'estimateHours must be between 0 and 1000')
+  return Math.round(n * 100) / 100
+}
+
+/** Delay (#3): marking a task delayed needs a reason; un-marking clears it. */
+function applyDelay(next, body, actor) {
+  if (!('delayed' in body) && !('delayReason' in body)) return
+  const delayed = 'delayed' in body ? Boolean(body.delayed) : next.delayed
+  if (!delayed) {
+    Object.assign(next, { delayed: false, delayReason: '', delayedBy: null })
+    return
+  }
+  const reason = text('delayReason' in body ? body.delayReason : next.delayReason, 'delayReason', { max: 500 })
+  if (!reason) throw new HttpError(400, 'invalid_input', 'Say why the task is delayed (delayReason)')
+  const wasDelayed = next.delayed
+  Object.assign(next, { delayed: true, delayReason: reason, ...(wasDelayed ? {} : { delayedBy: stamp(actor) }) })
+}
+
+function checkDates(card) {
+  if (card.startDate && card.dueDate && card.startDate > card.dueDate) {
+    throw new HttpError(400, 'invalid_input', 'startDate must be on or before dueDate')
+  }
+}
+
+async function notifyNewAssignees({ store, env, logger, card, before, after, actor }) {
+  const added = after.filter((p) => !before.includes(p.email))
+  if (!added.length) return
+  const [workspace, project] = await Promise.all([store.get('workspaces', card.workspaceId), store.get('projects', card.projectId)])
+  for (const assignee of added) await notifyAssigned({ env, logger, workspace, project, card, assignee, actor })
+}
+
+/** Builds and stores a new card; used by create, duplicate and convert. */
+async function insertCard(store, actor, project, fields) {
+  const now = stamp(actor)
+  const card = normalizeCard({
+    id: randomUUID(),
+    projectId: project.id,
+    workspaceId: project.workspaceId,
+    description: '',
+    column: 'backlog',
+    dueDate: null,
+    checklist: [],
+    commentCount: 0,
+    ...fields,
+    number: await store.increment(counterId(project.workspaceId)),
+    createdBy: now,
+    updatedBy: now,
+  })
+  if (typeof card.order !== 'number') card.order = await nextOrder(store, project.id, card.column)
+  checkDates(card)
+  return store.put('cards', card)
 }
 
 export async function createCard({ actor, store, env, logger, params, body }) {
   requireEdit(actor)
   const project = await loadProject(store, actor, params.id)
-  const col = body.column === undefined ? 'backlog' : column(body.column)
-  const assignee = await resolveAssignee(store, env, project.workspaceId, body.assigneeEmail)
-  const now = stamp(actor)
-  const card = await store.put('cards', {
-    id: randomUUID(),
-    projectId: project.id,
-    workspaceId: project.workspaceId,
+  const assignees = (await resolveAssignees(store, env, project.workspaceId, body)) ?? []
+  const fields = {
     title: text(body.title, 'title', { max: 200, required: true }),
     description: text(body.description, 'description', { max: 10000 }),
-    column: col,
-    order: typeof body.order === 'number' && Number.isFinite(body.order) ? body.order : await nextOrder(store, project.id, col),
-    assigneeEmail: assignee?.email || null,
+    column: body.column === undefined ? 'backlog' : column(body.column),
+    assigneeEmails: assignees.map((p) => p.email),
+    startDate: optionalDate(body.startDate, 'startDate'),
     dueDate: optionalDate(body.dueDate, 'dueDate'),
+    estimateHours: estimate(body.estimateHours),
+    labelIds: (await validLabelIds(store, body.labelIds)) ?? [],
     checklist: body.checklist === undefined ? [] : checklist(body.checklist),
-    commentCount: 0,
-    createdBy: now,
-    updatedBy: now,
-  })
-  if (assignee) {
-    const workspace = await store.get('workspaces', project.workspaceId)
-    await notifyAssigned({ env, logger, workspace, project, card, assignee, actor })
+    ...(typeof body.order === 'number' && Number.isFinite(body.order) ? { order: body.order } : {}),
   }
-  return ok({ card }, 201, {
+  applyDelay(fields, body, actor)
+  const card = await insertCard(store, actor, project, fields)
+  await notifyNewAssignees({ store, env, logger, card, before: [], after: assignees, actor })
+  const shown = presentCard(card, await prefixMap(store), env)
+  return ok({ card: shown }, 201, {
     action: 'card.create',
-    summary: `created card "${card.title}" in ${project.name}`,
+    summary: `created ${shown.key} "${card.title}" in ${project.name}`,
     workspaceId: card.workspaceId,
     projectId: card.projectId,
     cardId: card.id,
   })
 }
 
-export async function getCard({ actor, store, params }) {
+export async function getCard({ actor, store, env, params }) {
   const card = await loadCard(store, actor, params.id)
-  const comments = await store.find('comments', { cardId: card.id })
-  return ok({ card, comments: comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)) })
+  const [comments, child] = await Promise.all([
+    store.find('comments', { cardId: card.id }),
+    card.childProjectId ? store.get('projects', card.childProjectId) : null,
+  ])
+  let childProject = null
+  if (child) {
+    const childCards = await store.find('cards', { projectId: child.id })
+    childProject = {
+      id: child.id,
+      name: child.name,
+      cardCount: childCards.length,
+      doneCount: childCards.filter((c) => c.column === 'done').length,
+    }
+  }
+  return ok({
+    card: presentCard(card, await prefixMap(store), env),
+    comments: comments.sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    childProject,
+  })
 }
 
 const checklistSummary = (items) => `${items.filter((i) => i.done).length}/${items.length} done`
 
+function listDiff(before = [], after = []) {
+  const added = after.filter((x) => !before.includes(x))
+  const removed = before.filter((x) => !after.includes(x))
+  return added.length || removed.length ? { from: before, to: after, ...(added.length ? { added } : {}), ...(removed.length ? { removed } : {}) } : null
+}
+
 /** Old → new for every card field a PATCH touched (order is noise from dragging, so it's left out). */
 function cardChanges(before, after) {
   const changes = {}
-  for (const f of ['title', 'column', 'assigneeEmail', 'dueDate']) {
-    if (before[f] !== after[f]) changes[f] = { from: before[f] ?? null, to: after[f] ?? null }
+  for (const f of ['title', 'column', 'startDate', 'dueDate', 'estimateHours', 'delayed', 'delayReason']) {
+    if ((before[f] ?? null) !== (after[f] ?? null)) changes[f] = { from: before[f] ?? null, to: after[f] ?? null }
   }
+  const assignees = listDiff(before.assigneeEmails, after.assigneeEmails)
+  if (assignees) changes.assigneeEmails = assignees
+  const labels = listDiff(before.labelIds, after.labelIds)
+  if (labels) changes.labelIds = labels
   if (before.description !== after.description) {
     changes.description = { from: short(before.description), to: short(after.description) }
   }
@@ -469,29 +773,36 @@ function cardChanges(before, after) {
 }
 
 function describeCardChange(card, changes) {
-  if (changes.column) return `moved "${card.title}" from ${changes.column.from} to ${changes.column.to}`
-  if (changes.assigneeEmail) {
-    return changes.assigneeEmail.to ? `assigned "${card.title}" to ${changes.assigneeEmail.to}` : `unassigned "${card.title}"`
+  const name = `${card.key ? `${card.key} ` : ''}"${card.title}"`
+  if (changes.column) return `moved ${name} from ${changes.column.from} to ${changes.column.to}`
+  if (changes.delayed) return changes.delayed.to ? `marked ${name} delayed: ${card.delayReason}` : `cleared the delay on ${name}`
+  if (changes.assigneeEmails) {
+    return card.assigneeEmails.length ? `assigned ${name} to ${card.assigneeEmails.join(', ')}` : `unassigned ${name}`
+  }
+  if (changes.dueDate || changes.startDate) {
+    return `rescheduled ${name}${card.startDate ? ` ${card.startDate} →` : ' to'} ${card.dueDate || 'no date'}`
   }
   const fields = Object.keys(changes)
-  if (!fields.length) return `reordered "${card.title}"`
-  return `updated ${fields.join(', ')} on "${card.title}"`
+  if (!fields.length) return `reordered ${name}`
+  return `updated ${fields.join(', ')} on ${name}`
 }
 
 export async function updateCard({ actor, store, env, logger, params, body }) {
   requireEdit(actor)
-  const card = await loadCard(store, actor, params.id)
+  const card = normalizeCard(await loadCard(store, actor, params.id))
   const next = { ...card }
   if ('title' in body) next.title = text(body.title, 'title', { max: 200, required: true })
   if ('description' in body) next.description = text(body.description, 'description', { max: 10000 })
+  if ('startDate' in body) next.startDate = optionalDate(body.startDate, 'startDate')
   if ('dueDate' in body) next.dueDate = optionalDate(body.dueDate, 'dueDate')
+  if ('estimateHours' in body) next.estimateHours = estimate(body.estimateHours)
   if ('checklist' in body) next.checklist = checklist(body.checklist)
+  if ('labelIds' in body) next.labelIds = await validLabelIds(store, body.labelIds)
+  applyDelay(next, body, actor)
+  checkDates(next)
 
-  let newAssignee = null
-  if ('assigneeEmail' in body) {
-    newAssignee = await resolveAssignee(store, env, card.workspaceId, body.assigneeEmail)
-    next.assigneeEmail = newAssignee?.email || null
-  }
+  const assignees = await resolveAssignees(store, env, card.workspaceId, body)
+  if (assignees) next.assigneeEmails = assignees.map((p) => p.email)
 
   if ('column' in body) next.column = column(body.column)
   if ('order' in body) {
@@ -506,17 +817,11 @@ export async function updateCard({ actor, store, env, logger, params, body }) {
   next.updatedBy = stamp(actor)
   const saved = await store.put('cards', next)
   const changes = cardChanges(card, saved)
-
-  if (newAssignee && newAssignee.email !== card.assigneeEmail) {
-    const [workspace, project] = await Promise.all([
-      store.get('workspaces', card.workspaceId),
-      store.get('projects', card.projectId),
-    ])
-    await notifyAssigned({ env, logger, workspace, project, card: saved, assignee: newAssignee, actor })
-  }
-  return ok({ card: saved }, 200, {
+  if (assignees) await notifyNewAssignees({ store, env, logger, card: saved, before: card.assigneeEmails, after: assignees, actor })
+  const shown = presentCard(saved, await prefixMap(store), env)
+  return ok({ card: shown }, 200, {
     action: changes.column ? 'card.move' : 'card.update',
-    summary: describeCardChange(saved, changes),
+    summary: describeCardChange(shown, changes),
     workspaceId: saved.workspaceId,
     projectId: saved.projectId,
     cardId: saved.id,
@@ -524,9 +829,90 @@ export async function updateCard({ actor, store, env, logger, params, body }) {
   })
 }
 
+/** #1: a copy of everything but comments, history and the delay flag, placed right under the original. */
+export async function duplicateCard({ actor, store, env, params }) {
+  requireEdit(actor)
+  const card = normalizeCard(await loadCard(store, actor, params.id))
+  const project = await store.get('projects', card.projectId)
+  const lane = (await store.find('cards', { projectId: card.projectId, column: card.column })).sort((a, b) => a.order - b.order)
+  const below = lane[lane.findIndex((c) => c.id === card.id) + 1]
+  const copy = await insertCard(store, actor, project, {
+    title: `Copy of ${card.title}`.slice(0, 200),
+    description: card.description,
+    column: card.column,
+    order: below ? (card.order + below.order) / 2 : card.order + ORDER_STEP,
+    assigneeEmails: card.assigneeEmails,
+    labelIds: card.labelIds,
+    startDate: card.startDate,
+    dueDate: card.dueDate,
+    estimateHours: card.estimateHours,
+    checklist: card.checklist.map((i) => ({ id: randomUUID(), text: i.text, done: false })),
+  })
+  const prefixes = await prefixMap(store)
+  const shown = presentCard(copy, prefixes, env)
+  const source = presentCard(card, prefixes, env)
+  return ok({ card: shown }, 201, {
+    action: 'card.duplicate',
+    summary: `duplicated ${source.key} as ${shown.key} "${shown.title}"`,
+    workspaceId: copy.workspaceId,
+    projectId: copy.projectId,
+    cardId: copy.id,
+    changes: { from: source.key },
+  })
+}
+
+/**
+ * #9: turn a task whose scope has grown into a project. Each checklist item becomes a
+ * task (ticked ones straight to Done); the original stays open as the parent.
+ */
+export async function convertCard({ actor, store, env, params, body }) {
+  requireProjectEdit(actor)
+  const card = normalizeCard(await loadCard(store, actor, params.id))
+  if (card.childProjectId) throw new HttpError(409, 'already_converted', 'This task is already a project')
+  const project = await store.put('projects', {
+    id: randomUUID(),
+    workspaceId: card.workspaceId,
+    name: text(body.name ?? card.title, 'name', { max: 120, required: true }),
+    description: short(card.description, 2000) || '',
+    repoUrl: '',
+    dueDate: card.dueDate,
+    ongoing: false,
+    labelIds: card.labelIds,
+    parentCardId: card.id,
+    archived: false,
+    createdBy: stamp(actor),
+  })
+  const created = []
+  for (const item of card.checklist) {
+    created.push(
+      await insertCard(store, actor, project, {
+        title: item.text.slice(0, 200),
+        column: item.done ? 'done' : 'backlog',
+        assigneeEmails: card.assigneeEmails,
+        labelIds: card.labelIds,
+      }),
+    )
+  }
+  const parent = await store.put('cards', { ...card, checklist: [], childProjectId: project.id, updatedBy: stamp(actor) })
+  const prefixes = await prefixMap(store)
+  const shown = presentCard(parent, prefixes, env)
+  return ok(
+    { project: presentProject(project), card: shown, cards: created.map((c) => presentCard(c, prefixes, env)) },
+    201,
+    {
+      action: 'card.convert',
+      summary: `turned ${shown.key} "${card.title}" into project "${project.name}" with ${created.length} task${created.length === 1 ? '' : 's'}`,
+      workspaceId: card.workspaceId,
+      projectId: card.projectId,
+      cardId: card.id,
+      changes: { projectId: project.id, tasks: created.map((c) => c.title), checklist: { from: checklistSummary(card.checklist), to: 'moved to project' } },
+    },
+  )
+}
+
 export async function deleteCard({ actor, store, params }) {
   requireEdit(actor)
-  const card = await loadCard(store, actor, params.id)
+  const card = normalizeCard(await loadCard(store, actor, params.id))
   const comments = await store.find('comments', { cardId: card.id })
   for (const c of comments) await store.remove('comments', c)
   await store.remove('cards', card)
@@ -537,7 +923,17 @@ export async function deleteCard({ actor, store, params }) {
     projectId: card.projectId,
     cardId: card.id,
     // A deleted card is gone for good, so keep what it said.
-    changes: { snapshot: { title: card.title, column: card.column, assigneeEmail: card.assigneeEmail, dueDate: card.dueDate, description: short(card.description) } },
+    changes: {
+      snapshot: {
+        number: card.number,
+        title: card.title,
+        column: card.column,
+        assigneeEmails: card.assigneeEmails,
+        dueDate: card.dueDate,
+        estimateHours: card.estimateHours,
+        description: short(card.description),
+      },
+    },
   })
 }
 
@@ -613,24 +1009,116 @@ export async function deleteComment({ actor, store, params }) {
   })
 }
 
-// --- search -----------------------------------------------------------------------
+// --- search, cross-project queries, calendar --------------------------------------
 
-export async function search({ actor, store, query }) {
+async function visibleWorkspaceIds(store, actor, only) {
+  let ids = (await store.find('workspaces')).filter((a) => canAccessWorkspace(actor, a.id)).map((a) => a.id)
+  if (only) ids = ids.filter((id) => id === only)
+  return ids
+}
+
+async function withProjectNames(store, cards) {
+  const projectIds = [...new Set(cards.map((c) => c.projectId))]
+  const projects = projectIds.length ? await store.find('projects', { id: { in: projectIds } }) : []
+  const nameOf = Object.fromEntries(projects.map((p) => [p.id, p.name]))
+  return (c) => ({ projectName: nameOf[c.projectId] || '' })
+}
+
+export async function search({ actor, store, env, query }) {
   const q = text(query.q, 'q', { max: 100, required: true })
   if (q.length < 2) throw new HttpError(400, 'invalid_input', 'Search for at least 2 characters')
-  let workspaceIds = (await store.find('workspaces')).filter((a) => canAccessWorkspace(actor, a.id)).map((a) => a.id)
-  if (query.workspaceId) workspaceIds = workspaceIds.filter((id) => id === query.workspaceId)
+  const workspaceIds = await visibleWorkspaceIds(store, actor, query.workspaceId)
   if (!workspaceIds.length) return ok({ cards: [] })
 
-  const cards = await store.find(
+  const prefixes = await prefixMap(store)
+  // "ENG-12" jumps straight to that task.
+  const byKey = /^([A-Za-z][A-Za-z0-9]{1,4})-(\d+)$/.exec(q)
+  let exact = []
+  if (byKey) {
+    const workspaceId = workspaceIds.find((id) => prefixes[id] === byKey[1].toUpperCase())
+    if (workspaceId) exact = await store.find('cards', { workspaceId, number: Number(byKey[2]) }, { limit: 1 })
+  }
+  const found = await store.find(
     'cards',
     { workspaceId: { in: workspaceIds } },
     { contains: { fields: ['title', 'description'], text: q }, limit: 50 },
   )
-  const projectIds = [...new Set(cards.map((c) => c.projectId))]
-  const projects = projectIds.length ? await store.find('projects', { id: { in: projectIds } }) : []
-  const nameOf = Object.fromEntries(projects.map((p) => [p.id, p.name]))
-  return ok({ cards: cards.map((c) => ({ ...c, projectName: nameOf[c.projectId] || '' })) })
+  const cards = [...exact, ...found.filter((c) => !exact.some((e) => e.id === c.id))]
+  const names = await withProjectNames(store, cards)
+  return ok({ cards: cards.map((c) => presentCard(c, prefixes, env, names(c))) })
+}
+
+/** Split each task's planned hours evenly across its assignees; overall counts each task once. Done tasks don't count. */
+function hourTotals(cards) {
+  const byPerson = {}
+  let overall = 0
+  let unassigned = 0
+  for (const c of cards) {
+    if (c.column === 'done' || !c.plannedHours) continue
+    overall += c.plannedHours
+    if (!c.assigneeEmails.length) unassigned += c.plannedHours
+    for (const e of c.assigneeEmails) byPerson[e] = (byPerson[e] || 0) + c.plannedHours / c.assigneeEmails.length
+  }
+  const round = (n) => Math.round(n * 10) / 10
+  return {
+    overall: round(overall),
+    unassigned: round(unassigned),
+    byPerson: Object.fromEntries(Object.entries(byPerson).map(([e, h]) => [e, round(h)])),
+  }
+}
+
+/** #10: tasks across projects, filtered by label / workspace / person — for billing, the CRM and reports. */
+export async function queryCards({ actor, store, env, query }) {
+  const workspaceIds = await visibleWorkspaceIds(store, actor, query.workspaceId)
+  if (!workspaceIds.length) return ok({ cards: [], totals: hourTotals([]) })
+  const where = { workspaceId: { in: workspaceIds } }
+  if (query.labelId) where.labelIds = { has: String(query.labelId) }
+  if (query.assignee) where.assigneeEmails = { has: String(query.assignee).toLowerCase() }
+  if (query.column) where.column = column(query.column)
+  const raw = await store.find('cards', where, { limit: 500 })
+  const prefixes = await prefixMap(store)
+  const names = await withProjectNames(store, raw)
+  const cards = raw.map((c) => presentCard(c, prefixes, env, names(c)))
+  return ok({ cards, totals: hourTotals(cards) })
+}
+
+const MAX_RANGE_DAYS = 120
+
+/**
+ * #11: every task that overlaps [from, to] (start→due, or just due), in the workspaces
+ * the caller can see, plus undated open tasks for the "unscheduled" tray and hour totals.
+ */
+export async function calendar({ actor, store, env, query }) {
+  const from = optionalDate(query.from, 'from')
+  const to = optionalDate(query.to, 'to')
+  if (!from || !to || from > to) throw new HttpError(400, 'invalid_input', 'from and to are required (YYYY-MM-DD), from ≤ to')
+  if ((Date.parse(to) - Date.parse(from)) / 86400000 > MAX_RANGE_DAYS) {
+    throw new HttpError(400, 'invalid_input', `Ask for at most ${MAX_RANGE_DAYS} days at a time`)
+  }
+  const workspaceIds = await visibleWorkspaceIds(store, actor, query.workspaceId)
+  const people = []
+  for (const id of workspaceIds) for (const p of await workspacePeople(store, env, id)) if (!people.some((x) => x.email === p.email)) people.push(p)
+  if (!workspaceIds.length) return ok({ cards: [], unscheduled: [], totals: hourTotals([]), people })
+
+  const scope = { workspaceId: { in: workspaceIds } }
+  if (query.labelId) scope.labelIds = { has: String(query.labelId) }
+  if (query.assignee) scope.assigneeEmails = { has: String(query.assignee).toLowerCase() }
+  const [dated, undated] = await Promise.all([
+    store.find('cards', { ...scope, dueDate: { gte: from } }, { limit: 1000 }),
+    store.find('cards', { ...scope, dueDate: null }, { limit: 200 }),
+  ])
+  const inRange = dated.filter((c) => (c.startDate || c.dueDate) <= to)
+  const prefixes = await prefixMap(store)
+  const names = await withProjectNames(store, [...inRange, ...undated])
+  const cards = inRange.map((c) => presentCard(c, prefixes, env, names(c)))
+  return ok({
+    from,
+    to,
+    cards,
+    unscheduled: undated.filter((c) => c.column !== 'done').map((c) => presentCard(c, prefixes, env, names(c))),
+    totals: hourTotals(cards),
+    people: people.sort((a, b) => a.name.localeCompare(b.name)),
+  })
 }
 
 // --- members (human admins) ---------------------------------------------------------

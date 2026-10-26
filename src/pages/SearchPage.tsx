@@ -39,7 +39,9 @@ export default function SearchPage() {
           {results.map((c) => (
             <li key={c.id}>
               <Link to={`/p/${c.projectId}?card=${c.id}`} className="flex flex-wrap items-center gap-x-4 gap-y-1 px-5 py-3 hover:bg-muted">
+                {c.key && <span className="font-mono text-xs text-fg-subtle">{c.key}</span>}
                 <span className="min-w-0 flex-1 font-medium text-fg">{c.title}</span>
+                {c.delayed && <span className="border border-amber-400/50 bg-amber-400/10 px-1.5 text-xs text-amber-800" title={c.delayReason}>Delayed</span>}
                 <span className="text-sm text-fg-subtle">
                   {workspaceName[c.workspaceId] || c.workspaceId} / {c.projectName}
                 </span>
