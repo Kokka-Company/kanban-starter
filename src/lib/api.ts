@@ -322,6 +322,12 @@ export const api = {
   deleteComment: (id: string) => request('DELETE', `comments/${enc(id)}`),
 
   search: (q: string) => request<{ cards: Card[] }>('GET', `search?q=${enc(q)}`),
+  /** Tasks across projects (My tasks board, billing): filter by person, workspace, label. */
+  cards: (q: { assignee?: string; workspaceId?: string; labelId?: string }) => {
+    const qs = new URLSearchParams(Object.entries(q).filter(([, v]) => v) as [string, string][]).toString()
+    return request<{ cards: Card[]; totals: HourTotals }>('GET', `cards${qs ? `?${qs}` : ''}`)
+  },
+  workspaceMembers: (id: string) => request<{ members: Person[] }>('GET', `workspaces/${enc(id)}/members`),
 
   members: () => request<{ members: Member[] }>('GET', 'members'),
   createMember: (m: { email: string; name: string; role: Role; workspaceIds: string[] }) =>

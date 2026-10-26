@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import MyTasksSummary from '../components/MyTasksSummary'
 import { ArrowUpRight } from 'lucide-react'
 import { api, errorMessage, type Workspace } from '../lib/api'
 import { useAutoRefresh } from '../lib/useAutoRefresh'
@@ -37,6 +38,7 @@ export default function HomePage() {
 
   return (
     <>
+      <MyTasksSummary />
       <div className="mb-8">
         <h1 className="font-display text-3xl font-semibold tracking-tight text-fg sm:text-4xl">Workspaces</h1>
       </div>

@@ -10,6 +10,7 @@ import ProjectPage from './pages/ProjectPage'
 import SearchPage from './pages/SearchPage'
 import AdminPage from './pages/AdminPage'
 import CalendarPage from './pages/CalendarPage'
+import MyTasksPage from './pages/MyTasksPage'
 import { CenteredMessage, Spinner } from './components/ui'
 
 /** Loads the shared label list once; pickers call reload() after creating one. */
@@ -130,6 +131,7 @@ export default function App() {
             <Route path="/p/:projectId" element={<ProjectPage />} />
             <Route path="/search" element={<SearchPage />} />
             <Route path="/calendar" element={<CalendarPage />} />
+            <Route path="/tasks" element={<MyTasksPage />} />
             {me.isAdmin && <Route path="/admin" element={<AdminPage />} />}
             <Route path="*" element={<CenteredMessage title="Page not found" />} />
           </Routes>

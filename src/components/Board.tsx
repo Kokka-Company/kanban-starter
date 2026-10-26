@@ -56,6 +56,7 @@ export default function Board({
   onMove,
   onCreate,
   canEdit,
+  showProject = false,
 }: {
   cards: Card[]
   people: Person[]
@@ -63,7 +64,10 @@ export default function Board({
   canEdit: boolean
   onOpen: (id: string) => void
   onMove: (id: string, column: Column, order: number) => void
-  onCreate: (column: Column, title: string) => Promise<void>
+  /** Absent on boards that mix projects (My tasks): there's no single project to add to. */
+  onCreate?: (column: Column, title: string) => Promise<void>
+  /** Name each card's project (boards that mix projects). */
+  showProject?: boolean
 }) {
   const byId = useMemo(() => Object.fromEntries(cards.map((c) => [c.id, c])), [cards])
   const settled = useMemo(() => lanesFrom(cards), [cards])
@@ -155,11 +159,11 @@ export default function Board({
     >
       <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-4">
         {COLUMNS.map((col) => (
-          <Lane key={col} column={col} count={lanes[col].length} onCreate={canEdit ? onCreate : undefined}>
+          <Lane key={col} column={col} count={lanes[col].length} onCreate={canEdit && onCreate ? onCreate : undefined}>
             <SortableContext items={lanes[col]} strategy={verticalListSortingStrategy}>
               {lanes[col].map((id) =>
                 byId[id] ? (
-                  <SortableCard key={id} card={byId[id]} people={people} onOpen={onOpen} />
+                  <SortableCard key={id} card={byId[id]} people={people} onOpen={onOpen} showProject={showProject} />
                 ) : null,
               )}
             </SortableContext>
@@ -167,7 +171,7 @@ export default function Board({
         ))}
       </div>
       <DragOverlay>
-        {active ? <CardTile card={active} people={people} dragging /> : null}
+        {active ? <CardTile card={active} people={people} dragging showProject={showProject} /> : null}
       </DragOverlay>
     </DndContext>
   )
@@ -251,7 +255,7 @@ function Lane({
   )
 }
 
-function SortableCard({ card, people, onOpen }: { card: Card; people: Person[]; onOpen: (id: string) => void }) {
+function SortableCard({ card, people, onOpen, showProject }: { card: Card; people: Person[]; onOpen: (id: string) => void; showProject: boolean }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: card.id })
   return (
     <div
@@ -266,7 +270,7 @@ function SortableCard({ card, people, onOpen }: { card: Card; people: Person[]; 
         if (e.key === 'Enter') onOpen(card.id)
       }}
     >
-      <CardTile card={card} people={people} />
+      <CardTile card={card} people={people} showProject={showProject} />
     </div>
   )
 }
