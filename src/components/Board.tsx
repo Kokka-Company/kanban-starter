@@ -1,4 +1,5 @@
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import {
   DndContext,
   DragOverlay,
@@ -305,10 +306,15 @@ export function CardTile({
         </div>
       )}
       {showProject && card.projectName && (
-        <p className="mb-1 flex items-center gap-1 text-[11px] text-fg-subtle" title={`Project: ${card.projectName}`}>
+        <Link
+          to={`/p/${card.projectId}`}
+          onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}
+          className="mb-1 flex max-w-full items-center gap-1 text-[11px] text-fg-subtle hover:text-accent hover:underline"
+          title={`Open project: ${card.projectName}`}
+        >
           <Folder className="h-3 w-3 shrink-0" />
           <span className="truncate">{card.projectName}</span>
-        </p>
+        </Link>
       )}
       <p className={`whitespace-pre-wrap break-words ${card.column === 'done' ? 'text-fg-subtle line-through' : 'text-fg'}`}>{card.title}</p>
       {!compact && <LabelChips ids={card.labelIds} className="mt-2" />}

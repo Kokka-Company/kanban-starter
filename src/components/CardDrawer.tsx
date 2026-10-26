@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { Link } from 'react-router-dom'
-import { AlertTriangle, ArrowRight, ChevronDown, Copy, FolderPlus, History as HistoryIcon, Trash2, X } from 'lucide-react'
+import { Link, useLocation } from 'react-router-dom'
+import { AlertTriangle, ArrowRight, ChevronDown, Copy, FolderOpen, FolderPlus, History as HistoryIcon, Trash2, X } from 'lucide-react'
 import {
   api,
   COLUMNS,
@@ -46,6 +46,7 @@ export default function CardDrawer({
   onDuplicated?: (card: Card) => void
 }) {
   const { me } = useMe()
+  const { pathname } = useLocation()
   const [card, setCard] = useState<Card | null>(null)
   const [comments, setComments] = useState<Comment[]>([])
   const [childProject, setChildProject] = useState<ChildProject | null>(null)
@@ -160,6 +161,12 @@ export default function CardDrawer({
             )}
           </span>
           <div className="flex shrink-0 items-center gap-1">
+            {/* Opened from the calendar or search: a way into the task's own board. */}
+            {card && pathname !== `/p/${card.projectId}` && (
+              <Link to={`/p/${card.projectId}`} className="btn-ghost px-2 py-1.5 text-xs" title={card.projectName ? `Open project: ${card.projectName}` : 'Open project'}>
+                <FolderOpen className="h-4 w-4" /> Open project
+              </Link>
+            )}
             {card && me.canEdit && (
               <>
                 <button className="btn-ghost p-2" onClick={() => void duplicate()} disabled={busy} title="Duplicate task">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   DndContext,
   PointerSensor,
@@ -373,7 +373,11 @@ function Chip({ card }: { card: Card }) {
         {card.key && <span className="shrink-0 font-mono text-[10px] text-fg-subtle">{card.key}</span>}
         <span className="truncate">{card.title}</span>
       </div>
-      {card.projectName && <div className="truncate text-[10px] opacity-60">{card.projectName}</div>}
+      {card.projectName && (
+        <Link to={`/p/${card.projectId}`} onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()} className="block truncate text-[10px] opacity-60 hover:underline hover:opacity-100" title={`Open project: ${card.projectName}`}>
+          {card.projectName}
+        </Link>
+      )}
     </div>
   )
 }
@@ -642,7 +646,16 @@ function Timeline({
                       {card.delayed && <AlertTriangle className="h-3 w-3 shrink-0" />}
                       {card.key && <span className="shrink-0 font-mono text-[10px] opacity-70">{card.key}</span>}
                       <span className="min-w-0 shrink truncate">{card.title}</span>
-                      {card.projectName && <span className="min-w-0 shrink-[2] truncate opacity-60">· {card.projectName}</span>}
+                      {card.projectName && (
+                        <Link
+                          to={`/p/${card.projectId}`}
+                          onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}
+                          className="min-w-0 shrink-[2] truncate opacity-60 hover:underline hover:opacity-100"
+                          title={`Open project: ${card.projectName}`}
+                        >
+                          · {card.projectName}
+                        </Link>
+                      )}
                       {canEdit && (
                         <span
                           className="absolute inset-y-0 right-0 w-2 cursor-ew-resize hover:bg-black/10"
