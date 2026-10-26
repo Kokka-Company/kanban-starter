@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            api/package-lock.json
+      - run: npm ci --legacy-peer-deps
+      - run: npm ci
+        working-directory: api
+      - name: API tests (access control, keys, logging, sessions)
+        run: npm run test:api
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build

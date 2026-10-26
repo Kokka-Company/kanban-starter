@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Theme. Placeholder white and grey — replace these values with your brand.
+ * Each value is "R G B" so Tailwind opacity modifiers (e.g. bg-accent/10) work.
+ */
+@layer base {
+  :root {
+    --canvas: 244 244 245; /* page background */
+    --surface: 255 255 255; /* panels, cards, inputs */
+    --muted: 228 228 231; /* hover fills, chips */
+    --line: 228 228 231; /* borders */
+    --line-strong: 212 212 216;
+    --fg: 24 24 27; /* main text */
+    --fg-muted: 63 63 70;
+    --fg-subtle: 113 113 122;
+    --accent: 82 82 91; /* buttons, links, focus — your brand colour goes here */
+    --accent-fg: 255 255 255; /* text on accent */
+    color-scheme: light;
+    accent-color: rgb(var(--accent));
+  }
+  body {
+    @apply bg-canvas font-sans text-fg antialiased;
+  }
+  ::selection {
+    background: rgb(var(--accent) / 0.2);
+  }
+}
+
+@layer components {
+  /* Panel used for tiles, lanes and lists. */
+  .glass {
+    @apply border border-line bg-surface;
+  }
+  /* Floating panels (drawer, dialogs, menus). */
+  .glass-solid {
+    @apply border border-line bg-surface shadow-xl;
+  }
+  .input {
+    @apply w-full border border-line-strong bg-surface px-3 py-2 text-sm text-fg placeholder:text-fg-subtle transition focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/30;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-accent-fg hover:bg-accent/90;
+  }
+  .btn-ghost {
+    @apply btn text-fg-muted hover:bg-muted hover:text-fg;
+  }
+  .btn-danger {
+    @apply btn text-red-700 hover:bg-red-50;
+  }
+  .label {
+    @apply mb-1.5 block font-mono text-[11px] uppercase tracking-[0.12em] text-fg-subtle;
+  }
+}

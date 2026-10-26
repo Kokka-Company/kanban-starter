@@ -1,0 +1,11 @@
+node_modules
+dist
+
+# Local secrets and local dev data — never commit
+api/local.settings.json
+api/.local-data.json
+.env
+.env.*
+!.env.example
+
+.DS_Store

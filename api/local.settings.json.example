@@ -1,0 +1,19 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "",
+
+    "KANBAN_ADMIN_EMAILS": "you@yourcompany.com",
+    "KANBAN_SEED_WORKSPACES": "Engineering,Marketing,Operations",
+    "KANBAN_EDIT_DOMAINS": "",
+    "KANBAN_PUBLIC_URL": "http://localhost:5174",
+    "KANBAN_SESSION_SECRET": "",
+
+    "KANBAN_DEV_USER": "you@yourcompany.com",
+
+    "COSMOS_ENDPOINT": "",
+    "COSMOS_KEY": "",
+    "COSMOS_DATABASE": "kanban"
+  }
+}

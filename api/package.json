@@ -1,0 +1,18 @@
+{
+  "name": "kanban-starter-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "API for kanban-starter: workspaces, projects, cards and comments in Cosmos DB, with Microsoft sign-in via Static Web Apps and API keys for AI.",
+  "main": "src/functions/*.mjs",
+  "scripts": {
+    "start": "func start",
+    "dev": "node scripts/dev-server.mjs",
+    "test": "node scripts/test-api.mjs"
+  },
+  "dependencies": {
+    "@azure/cosmos": "^4.10.1",
+    "@azure/functions": "^4.5.1"
+  },
+  "license": "Apache-2.0"
+}

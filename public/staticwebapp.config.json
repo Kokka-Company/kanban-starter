@@ -1,0 +1,28 @@
+{
+  "routes": [
+    { "route": "/login", "rewrite": "/.auth/login/aad" },
+    { "route": "/logout", "redirect": "/api/logout" },
+    { "route": "/.auth/login/github", "statusCode": 404 },
+    { "route": "/api/*", "allowedRoles": ["anonymous", "authenticated"] },
+    { "route": "/*", "allowedRoles": ["authenticated"] }
+  ],
+  "responseOverrides": {
+    "401": {
+      "redirect": "/.auth/login/aad?post_login_redirect_uri=.referrer",
+      "statusCode": 302
+    }
+  },
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": ["/assets/*", "/.auth/*", "/api/*", "/*.ico", "/*.svg", "/*.json"]
+  },
+  "globalHeaders": {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "same-origin",
+    "X-Robots-Tag": "noindex, nofollow"
+  },
+  "platform": {
+    "apiRuntime": "node:20"
+  }
+}
