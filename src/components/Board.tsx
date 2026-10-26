@@ -14,7 +14,7 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { AlertTriangle, CalendarDays, CheckSquare, Clock, MessageSquare, Plus } from 'lucide-react'
+import { AlertTriangle, CalendarDays, CheckSquare, Clock, Folder, MessageSquare, Plus } from 'lucide-react'
 import { COLUMNS, COLUMN_LABELS, formatDue, formatHours, isOverdue, type Card, type Column, type Person } from '../lib/api'
 import { AvatarStack, LabelChips } from './pickers'
 
@@ -271,7 +271,20 @@ function SortableCard({ card, people, onOpen }: { card: Card; people: Person[]; 
 }
 
 /** One task on a board or calendar. Delayed tasks (#3) are yellow; overdue dates are red. */
-export function CardTile({ card, people, dragging = false, compact = false }: { card: Card; people: Person[]; dragging?: boolean; compact?: boolean }) {
+export function CardTile({
+  card,
+  people,
+  dragging = false,
+  compact = false,
+  showProject = false,
+}: {
+  card: Card
+  people: Person[]
+  dragging?: boolean
+  compact?: boolean
+  /** Name the project the task belongs to — used where tasks from many projects mix (calendar). */
+  showProject?: boolean
+}) {
   const done = card.checklist.filter((i) => i.done).length
   const overdue = isOverdue(card)
   const tone = card.delayed
@@ -290,6 +303,12 @@ export function CardTile({ card, people, dragging = false, compact = false }: { 
             </span>
           )}
         </div>
+      )}
+      {showProject && card.projectName && (
+        <p className="mb-1 flex items-center gap-1 text-[11px] text-fg-subtle" title={`Project: ${card.projectName}`}>
+          <Folder className="h-3 w-3 shrink-0" />
+          <span className="truncate">{card.projectName}</span>
+        </p>
       )}
       <p className={`whitespace-pre-wrap break-words ${card.column === 'done' ? 'text-fg-subtle line-through' : 'text-fg'}`}>{card.title}</p>
       {!compact && <LabelChips ids={card.labelIds} className="mt-2" />}

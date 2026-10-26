@@ -354,7 +354,7 @@ function DayCell({ day, className, children }: { day: string; className: string;
   )
 }
 
-/** One-line chip for the month grid. */
+/** Month-grid chip: task on the first line, its project underneath. */
 function Chip({ card }: { card: Card }) {
   const tone = card.delayed
     ? 'border-amber-400/60 bg-amber-400/10 text-amber-900'
@@ -364,10 +364,16 @@ function Chip({ card }: { card: Card }) {
         ? 'border-line bg-canvas text-fg-subtle line-through'
         : 'border-line bg-surface text-fg hover:border-accent/50'
   return (
-    <div className={`flex cursor-pointer items-center gap-1 truncate border px-1.5 py-0.5 text-[11px] ${tone}`} title={`${card.key ?? ''} ${card.title}${card.delayed ? ` — delayed: ${card.delayReason}` : ''}`}>
-      {card.delayed && <AlertTriangle className="h-3 w-3 shrink-0 text-amber-700" />}
-      {card.key && <span className="shrink-0 font-mono text-[10px] text-fg-subtle">{card.key}</span>}
-      <span className="truncate">{card.title}</span>
+    <div
+      className={`cursor-pointer border px-1.5 py-0.5 text-[11px] ${tone}`}
+      title={`${card.key ?? ''} ${card.title}${card.projectName ? ` · ${card.projectName}` : ''}${card.delayed ? ` — delayed: ${card.delayReason}` : ''}`}
+    >
+      <div className="flex items-center gap-1 truncate">
+        {card.delayed && <AlertTriangle className="h-3 w-3 shrink-0 text-amber-700" />}
+        {card.key && <span className="shrink-0 font-mono text-[10px] text-fg-subtle">{card.key}</span>}
+        <span className="truncate">{card.title}</span>
+      </div>
+      {card.projectName && <div className="truncate text-[10px] opacity-60">{card.projectName}</div>}
     </div>
   )
 }
@@ -426,8 +432,7 @@ function Week({ from, to, cards, people, canEdit, onOpen }: { from: string; to: 
             <div className="flex min-h-32 flex-1 flex-col gap-2 p-2">
               {list.map((c) => (
                 <DraggableCard key={c.id} card={c} canEdit={canEdit} onOpen={onOpen}>
-                  <CardTile card={c} people={people} compact />
-                  {c.projectName && <p className="mt-0.5 truncate px-1 text-[10px] text-fg-subtle">{c.projectName}</p>}
+                  <CardTile card={c} people={people} compact showProject />
                 </DraggableCard>
               ))}
             </div>
@@ -454,11 +459,11 @@ function Tray({ cards, people, canEdit, onOpen, droppable = false, hint }: { car
           {cards.map((c) =>
             droppable ? (
               <DraggableCard key={c.id} card={c} canEdit={canEdit} onOpen={onOpen}>
-                <CardTile card={c} people={people} compact />
+                <CardTile card={c} people={people} compact showProject />
               </DraggableCard>
             ) : (
               <div key={c.id} onClick={() => onOpen(c.id)}>
-                <CardTile card={c} people={people} compact />
+                <CardTile card={c} people={people} compact showProject />
               </div>
             ),
           )}
@@ -636,7 +641,8 @@ function Timeline({
                     >
                       {card.delayed && <AlertTriangle className="h-3 w-3 shrink-0" />}
                       {card.key && <span className="shrink-0 font-mono text-[10px] opacity-70">{card.key}</span>}
-                      <span className="truncate">{card.title}</span>
+                      <span className="min-w-0 shrink truncate">{card.title}</span>
+                      {card.projectName && <span className="min-w-0 shrink-[2] truncate opacity-60">· {card.projectName}</span>}
                       {canEdit && (
                         <span
                           className="absolute inset-y-0 right-0 w-2 cursor-ew-resize hover:bg-black/10"
