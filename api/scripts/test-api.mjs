@@ -552,6 +552,65 @@ await test('migration numbers old cards and converts single assignees, idempoten
   assert.equal((await store.get('cards', 'legacy-1')).number, once.number, 'second run changes nothing')
 })
 
+await test('a project completes only when every task is done, and new open work reopens it', async () => {
+  const ME = 'finisher@example.com'
+  await call('POST /members', { as: ADMIN, body: { email: ME, name: 'Finisher', workspaceIds: ['alpha-team'] } })
+  const project = (await call('POST /workspaces/{id}/projects', { as: ME, params: { id: 'alpha-team' }, body: { name: 'Finish me' } })).body.project
+  assert.equal(project.completed, false)
+  const complete = () => call('PATCH /projects/{id}', { as: ME, params: { id: project.id }, body: { completed: true } })
+  assert.equal((await complete()).body.error, 'no_tasks')
+  const a = (await call('POST /projects/{id}/cards', { as: ME, params: { id: project.id }, body: { title: 'A', column: 'doing' } })).body.card
+  assert.equal((await complete()).body.error, 'tasks_open')
+  await call('PATCH /cards/{id}', { as: ME, params: { id: a.id }, body: { column: 'done' } })
+  const done = await complete()
+  assert.equal(done.status, 200)
+  assert.equal(done.body.project.completed, true)
+  assert.ok(done.body.project.completedAt)
+  const log = await call('GET /activity', { as: ADMIN, query: { actor: ME } })
+  assert.ok(log.body.entries.some((e) => e.action === 'project.complete'))
+
+  await call('PATCH /cards/{id}', { as: ME, params: { id: a.id }, body: { column: 'review' } })
+  const board = await call('GET /projects/{id}', { as: ME, params: { id: project.id } })
+  assert.equal(board.body.project.completed, false, 'pulling a task out of Done reopens it')
+
+  await call('PATCH /cards/{id}', { as: ME, params: { id: a.id }, body: { column: 'done' } })
+  await complete()
+  await call('POST /projects/{id}/cards', { as: ME, params: { id: project.id }, body: { title: 'B', column: 'todo' } })
+  assert.equal((await call('GET /projects/{id}', { as: ME, params: { id: project.id } })).body.project.completed, false, 'a new task reopens it')
+})
+
+await test('day plans: private to each person, validated, and saved per day', async () => {
+  const ME = 'planner@example.com'
+  await call('POST /members', { as: ADMIN, body: { email: ME, name: 'Planner', workspaceIds: ['alpha-team'] } })
+  const date = '2026-11-02'
+  const empty = await call('GET /dayplans/{date}', { as: ME, params: { date } })
+  assert.equal(empty.status, 200)
+  assert.deepEqual(empty.body.plan.items, [])
+  assert.equal(empty.body.plan.focusMinutes, 25)
+
+  const body = {
+    startTime: '08:30',
+    items: [{ cardId: 'c1', pomodoros: 2, done: 1 }, { cardId: 'c2', pomodoros: 1 }],
+    blocks: [
+      { kind: 'focus', cardId: 'c1', start: '08:30', end: '08:55' },
+      { kind: 'break', start: '08:55', end: '09:00' },
+    ],
+  }
+  const saved = await call('POST /dayplans/{date}', { as: ME, params: { date }, body })
+  assert.equal(saved.status, 200)
+  assert.equal(saved.body.plan.startTime, '08:30')
+  assert.equal(saved.body.plan.items[1].done, 0)
+  assert.equal(saved.body.plan.blocks[1].cardId, null)
+  assert.equal((await call('GET /dayplans/{date}', { as: ME, params: { date } })).body.plan.items.length, 2)
+  assert.equal((await call('GET /dayplans/{date}', { as: ADMIN, params: { date } })).body.plan.items.length, 0, "an admin sees their own plan, not someone else's")
+
+  const bad = (b) => call('POST /dayplans/{date}', { as: ME, params: { date }, body: b })
+  assert.equal((await bad({ startTime: '25:00' })).status, 400)
+  assert.equal((await bad({ items: [{ cardId: 'x' }, { cardId: 'x' }] })).status, 400)
+  assert.equal((await bad({ blocks: [{ kind: 'nap', start: '09:00', end: '09:10' }] })).status, 400)
+  assert.equal((await call('GET /dayplans/{date}', { as: ME, params: { date: 'today' } })).status, 400)
+})
+
 await test('admins cannot demote or delete themselves', async () => {
   assert.equal((await call('PATCH /members/{email}', { as: ADMIN, params: { email: ADMIN }, body: { role: 'member' } })).status, 400)
   assert.equal((await call('DELETE /members/{email}', { as: ADMIN, params: { email: ADMIN } })).status, 400)

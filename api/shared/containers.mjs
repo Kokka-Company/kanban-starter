@@ -12,6 +12,7 @@ export const CONTAINERS = {
   activity: 'workspaceId', // 'global' for events not tied to one workspace (people, keys)
   labels: 'id', // shared across workspaces
   counters: 'id', // `task-<workspaceId>` → next task number
+  dayPlans: 'email', // id `<email>|<date>`: one plan (priorities + pomodoro schedule) per person per day
 }
 
 /** Range operators accepted in a `where` value, e.g. { dueDate: { gte: '2026-11-01' } }. */

@@ -54,6 +54,9 @@ export const ROUTES = [
   ['POST', 'keys', h.createKey],
   ['DELETE', 'keys/{id}', h.revokeKey],
 
+  ['GET', 'dayplans/{date}', h.getDayPlan],
+  ['POST', 'dayplans/{date}', h.saveDayPlan],
+
   ['GET', 'activity', h.listActivity],
   ['GET', 'cards/{id}/activity', h.cardActivity],
 ].map(([method, path, handler]) => ({ method, path, handler }))

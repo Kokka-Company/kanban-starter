@@ -43,6 +43,9 @@ export interface Project {
   labelIds: string[]
   /** Set when this project was made from a task. */
   parentCardId: string | null
+  /** Every task reached Done and someone pressed "Complete project". */
+  completed: boolean
+  completedAt: string | null
   cardCount?: number
   openCount?: number
 }
@@ -198,6 +201,39 @@ export interface Me {
   workspaces: Workspace[]
 }
 
+/** One task on a day plan, in priority order. */
+export interface DayPlanItem {
+  cardId: string
+  /** Pomodoros set aside for it today. */
+  pomodoros: number
+  /** Pomodoros finished on it today. */
+  done: number
+}
+
+/** A slot on the day's timeline, "HH:MM" local times. */
+export interface DayBlock {
+  kind: 'focus' | 'break' | 'long'
+  cardId: string | null
+  start: string
+  end: string
+}
+
+export interface DayPlan {
+  id: string
+  date: string
+  startTime: string
+  endTime: string
+  focusMinutes: number
+  breakMinutes: number
+  longBreakMinutes: number
+  longBreakEvery: number
+  items: DayPlanItem[]
+  blocks: DayBlock[]
+  updatedAt: string | null
+}
+
+export type DayPlanInput = Omit<DayPlan, 'id' | 'date' | 'updatedAt'>
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -286,7 +322,7 @@ export const api = {
     }>('GET', `projects/${enc(projectId)}`),
   updateProject: (
     id: string,
-    patch: Partial<Pick<Project, 'name' | 'description' | 'repoUrl' | 'archived' | 'dueDate' | 'ongoing' | 'labelIds'>>,
+    patch: Partial<Pick<Project, 'name' | 'description' | 'repoUrl' | 'archived' | 'dueDate' | 'ongoing' | 'labelIds' | 'completed'>>,
   ) =>
     request<{ project: Project }>('PATCH', `projects/${enc(id)}`, patch),
   deleteProject: (id: string) => request('DELETE', `projects/${enc(id)}`),
@@ -321,6 +357,8 @@ export const api = {
     request<{ comment: Comment }>('POST', `cards/${enc(cardId)}/comments`, { body, mentions }),
   deleteComment: (id: string) => request('DELETE', `comments/${enc(id)}`),
 
+  dayPlan: (date: string) => request<{ plan: DayPlan }>('GET', `dayplans/${enc(date)}`),
+  saveDayPlan: (date: string, plan: DayPlanInput) => request<{ plan: DayPlan }>('POST', `dayplans/${enc(date)}`, plan),
   search: (q: string) => request<{ cards: Card[] }>('GET', `search?q=${enc(q)}`),
   /** Tasks across projects (My tasks board, billing): filter by person, workspace, label. */
   cards: (q: { assignee?: string; workspaceId?: string; labelId?: string }) => {

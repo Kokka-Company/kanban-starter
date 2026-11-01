@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, CornerLeftUp, Github, Pencil, X } from 'lucide-react'
+import { ArrowLeft, CornerLeftUp, Github, PartyPopper, Pencil, Trophy, X } from 'lucide-react'
 import { api, errorMessage, isOverdue, type Workspace, type Card, type Column, type Person, type Project } from '../lib/api'
 import { useMe } from '../lib/me'
 import { useLabels } from '../lib/labels'
@@ -12,6 +12,7 @@ import WorkspaceMark from '../components/WorkspaceMark'
 import { LabelChips, LabelPicker, PersonFilter } from '../components/pickers'
 import { matchesPeople } from '../lib/filters'
 import { ProjectDueBadge, ProjectDueField } from '../components/ProjectDue'
+import { confetti } from '../lib/confetti'
 
 type ParentCard = { id: string; projectId: string; title: string; key: string | null }
 
@@ -54,6 +55,21 @@ export default function ProjectPage() {
     },
     [projectId],
   )
+
+  const [completing, setCompleting] = useState(false)
+  const setCompleted = async (completed: boolean) => {
+    if (!project) return
+    if (completed) confetti()
+    setCompleting(true)
+    try {
+      setProject((await api.updateProject(project.id, { completed })).project)
+      setError('')
+    } catch (err) {
+      setError(errorMessage(err, 'Could not update the project.'))
+    } finally {
+      setCompleting(false)
+    }
+  }
 
   useEffect(() => {
     void load()
@@ -108,6 +124,9 @@ export default function ProjectPage() {
     setText('')
   }
 
+  // Every task on the board is in Done.
+  const allDone = cards.length > 0 && cards.every((c) => c.column === 'done')
+
   if (error && !project) return <ErrorNote message={error} />
   if (!project || !workspace) return <Spinner />
 
@@ -148,6 +167,12 @@ export default function ProjectPage() {
             View only
           </span>
         )}
+        {project.completed && (
+          <span className="inline-flex items-center gap-1 border border-emerald-600/40 bg-emerald-50 px-2 py-0.5 font-mono text-[11px] uppercase tracking-widest text-emerald-800">
+            <Trophy className="h-3.5 w-3.5" /> Completed
+            {project.completedAt && ` ${new Date(project.completedAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}`}
+          </span>
+        )}
         <ProjectDueBadge dueDate={project.dueDate} ongoing={project.ongoing} />
         <LabelChips ids={project.labelIds} />
         {parentCard && (
@@ -160,6 +185,23 @@ export default function ProjectPage() {
         )}
       </div>
       {project.description && <p className="-mt-2 mb-5 max-w-3xl text-sm text-fg-muted">{project.description}</p>}
+
+      {allDone && !project.completed && me.canEdit && (
+        <div className="mb-5 flex flex-wrap items-center gap-4 border border-emerald-600/40 bg-emerald-50 px-5 py-4">
+          <PartyPopper className="h-7 w-7 shrink-0 text-emerald-700" />
+          <div className="min-w-0 flex-1">
+            <p className="font-display text-lg font-semibold text-fg">Everything's in Done</p>
+            <p className="text-sm text-emerald-900/80">All {cards.length} task{cards.length === 1 ? ' is' : 's are'} finished. Mark the project complete?</p>
+          </div>
+          <button
+            className="btn bg-emerald-600 px-5 py-2.5 text-base font-semibold text-white hover:bg-emerald-700"
+            disabled={completing}
+            onClick={() => void setCompleted(true)}
+          >
+            <Trophy className="h-5 w-5" /> Complete Project
+          </button>
+        </div>
+      )}
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input className="input w-56" placeholder="Filter this board…" value={text} onChange={(e) => setText(e.target.value)} />
@@ -293,6 +335,16 @@ function EditProject({ project, onClose, onSaved }: { project: Project; onClose:
           <button className="btn-primary" disabled={busy}>Save</button>
           <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
           <span className="flex-1" />
+          {project.completed && (
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={busy}
+              onClick={() => void run(async () => onSaved((await api.updateProject(project.id, { completed: false })).project))}
+            >
+              Reopen
+            </button>
+          )}
           <button
             type="button"
             className="btn-ghost"

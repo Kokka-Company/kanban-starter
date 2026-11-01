@@ -61,7 +61,7 @@ Paths are relative to `/api/v1`.
 | GET | `/workspaces/{id}/projects` | Projects (add `?archived=true` to include archived ones) |
 | POST | `/workspaces/{id}/projects` | Create a project: `{ name, description?, repoUrl?, dueDate?, ongoing?, labelIds? }` |
 | GET | `/projects/{id}` | The whole board: project, workspace, cards and members |
-| PATCH | `/projects/{id}` | Update a project: `{ name?, description?, repoUrl?, archived?, dueDate?, ongoing?, labelIds? }`. Set `ongoing: true` for no end date |
+| PATCH | `/projects/{id}` | Update a project: `{ name?, description?, repoUrl?, archived?, dueDate?, ongoing?, labelIds?, completed? }`. Set `ongoing: true` for no end date. `completed: true` works only when every task is in Done, otherwise `409 tasks_open` / `no_tasks` |
 | DELETE | `/projects/{id}` | Delete a project with all its cards and comments |
 | GET | `/projects/{id}/cards` | Cards (filter with `?column=todo` and/or `?assignee=email`) |
 | POST | `/projects/{id}/cards` | Create a card: `{ title, description?, column?, assigneeEmails?, startDate?, dueDate?, estimateHours?, labelIds?, checklist?, delayed?, delayReason? }` |
@@ -96,6 +96,8 @@ Notes:
   - `startDate` can't be after `dueDate`.
 - **Moving a card:** `PATCH /cards/{id}` with `{ "column": "done" }` puts it at the bottom of that column. To place it in a specific spot, also send an `order` number. Cards in a column are sorted by `order`, so pick a number between the two neighbours.
 - **Checklists:** send the whole list each time: `[{ "text": "…", "done": false }]`. Keep each existing item's `id`; new items get one automatically.
+- **Completing a project:** a completed project has `completed: true` and `completedAt`. Adding an open task, or moving one out of Done, reopens it automatically. `completed: false` reopens it by hand.
+- **Day plans** (`GET`/`POST /api/dayplans/{YYYY-MM-DD}`, signed-in people only, not keys): your own priorities and pomodoro schedule for a day, behind My tasks → Today's plan. Body `{ startTime, endTime, focusMinutes, breakMinutes, longBreakMinutes, longBreakEvery, items: [{ cardId, pomodoros, done }], blocks: [{ kind: focus|break|long, cardId, start: HH:MM, end: HH:MM }] }`. Nobody else can read yours.
 - **Teams:** assigning someone, or @mentioning them in a comment, posts to that workspace's Teams channel if a webhook is set.
 
 ## Examples

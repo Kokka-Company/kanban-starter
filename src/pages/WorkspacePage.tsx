@@ -89,6 +89,7 @@ export default function WorkspacePage() {
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-fg">{p.name}</span>
                   {p.archived && <span className="bg-muted px-1.5 text-xs text-fg-muted">Archived</span>}
+                  {p.completed && <span className="bg-emerald-100 px-1.5 text-xs text-emerald-800">Completed</span>}
                 </div>
                 {p.description && <p className="mt-0.5 truncate text-sm text-fg-subtle">{p.description}</p>}
                 {(p.dueDate || p.ongoing || p.labelIds.length > 0) && (

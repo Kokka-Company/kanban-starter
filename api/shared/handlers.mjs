@@ -487,7 +487,21 @@ function projectDue(body, current = { dueDate: null, ongoing: false }) {
 }
 
 function presentProject(p) {
-  return { ...p, dueDate: p.dueDate ?? null, ongoing: Boolean(p.ongoing), labelIds: p.labelIds || [], parentCardId: p.parentCardId || null }
+  return {
+    ...p,
+    dueDate: p.dueDate ?? null,
+    ongoing: Boolean(p.ongoing),
+    labelIds: p.labelIds || [],
+    parentCardId: p.parentCardId || null,
+    completed: Boolean(p.completed),
+    completedAt: p.completedAt || null,
+  }
+}
+
+/** A completed project gets new open work (a new task, or one pulled back out of Done): it isn't complete any more. */
+async function reopenProject(store, projectId) {
+  const project = await store.get('projects', projectId)
+  if (project?.completed) await store.put('projects', { ...project, completed: false, completedAt: null })
 }
 
 export async function listProjects({ actor, store, params, query }) {
@@ -560,16 +574,29 @@ export async function updateProject({ actor, store, params, body }) {
   if ('repoUrl' in body) next.repoUrl = optionalUrl(body.repoUrl, 'repoUrl')
   if ('archived' in body) next.archived = Boolean(body.archived)
   if ('labelIds' in body) next.labelIds = await validLabelIds(store, body.labelIds)
+  if ('completed' in body && Boolean(body.completed) !== project.completed) {
+    next.completed = Boolean(body.completed)
+    if (next.completed) {
+      // Only when everything on the board has reached Done.
+      const live = await store.find('cards', { projectId: project.id })
+      if (!live.length) throw new HttpError(409, 'no_tasks', 'A project needs at least one task to be completed')
+      const open = live.filter((c) => c.column !== 'done').length
+      if (open) throw new HttpError(409, 'tasks_open', `${open} task${open === 1 ? ' is' : 's are'} not done yet`)
+      next.completedAt = new Date().toISOString()
+    } else {
+      next.completedAt = null
+    }
+  }
   const changes = {}
-  for (const f of ['name', 'description', 'repoUrl', 'archived', 'dueDate', 'ongoing']) {
+  for (const f of ['name', 'description', 'repoUrl', 'archived', 'dueDate', 'ongoing', 'completed']) {
     if (next[f] !== project[f]) changes[f] = { from: short(project[f]), to: short(next[f]) }
   }
   if (JSON.stringify(next.labelIds) !== JSON.stringify(project.labelIds)) changes.labelIds = { from: project.labelIds, to: next.labelIds }
   next.updatedBy = stamp(actor)
   const saved = await store.put('projects', next)
   return ok({ project: presentProject(saved) }, 200, {
-    action: 'project.update',
-    summary: `updated project "${saved.name}"`,
+    action: changes.completed ? (saved.completed ? 'project.complete' : 'project.reopen') : 'project.update',
+    summary: changes.completed ? `${saved.completed ? 'completed' : 'reopened'} project "${saved.name}"` : `updated project "${saved.name}"`,
     workspaceId: saved.workspaceId,
     projectId: saved.id,
     changes,
@@ -683,6 +710,7 @@ async function insertCard(store, actor, project, fields) {
   })
   if (typeof card.order !== 'number') card.order = await nextOrder(store, project.id, card.column)
   checkDates(card)
+  if (project.completed && card.column !== 'done') await reopenProject(store, project.id)
   return store.put('cards', card)
 }
 
@@ -805,6 +833,8 @@ export async function updateCard({ actor, store, env, logger, params, body }) {
   if (assignees) next.assigneeEmails = assignees.map((p) => p.email)
 
   if ('column' in body) next.column = column(body.column)
+  // Pulling a task back out of Done reopens a completed project.
+  if (next.column !== 'done' && card.column === 'done') await reopenProject(store, card.projectId)
   if ('order' in body) {
     if (typeof body.order !== 'number' || !Number.isFinite(body.order)) {
       throw new HttpError(400, 'invalid_input', 'order must be a number')
@@ -1275,6 +1305,111 @@ export async function revokeKey({ actor, store, params }) {
     action: 'key.revoke',
     summary: `revoked API key "${record.name}"`,
     changes: { keyId: record.id },
+  })
+}
+
+// --- day plans (My tasks → Today) ---------------------------------------------------
+
+/**
+ * One document per person per day: the tasks they mean to work on, in priority order,
+ * how many pomodoros each gets (and how many are done), and the time blocks the
+ * "Auto-plan" button laid out. Private to its owner; only people (not keys) have one.
+ */
+const dayPlanId = (email, date) => `${email}|${date}`
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/
+
+function hhmm(value, field, fallback) {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value !== 'string' || !HHMM.test(value)) throw new HttpError(400, 'invalid_input', `${field} must be HH:MM`)
+  return value
+}
+
+function wholeNumber(value, field, { min, max, fallback }) {
+  if (value === undefined || value === null) return fallback
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new HttpError(400, 'invalid_input', `${field} must be a whole number from ${min} to ${max}`)
+  }
+  return value
+}
+
+function shortId(value, field) {
+  if (typeof value !== 'string' || !value || value.length > 64) throw new HttpError(400, 'invalid_input', `${field} must be an id`)
+  return value
+}
+
+function requireDayPlanner(actor) {
+  if (actor.type !== 'user') throw new HttpError(403, 'people_only', 'Day plans belong to people, not keys')
+  requireEdit(actor)
+}
+
+function emptyDayPlan(email, date) {
+  return {
+    id: dayPlanId(email, date),
+    email,
+    date,
+    startTime: '09:00',
+    endTime: '17:30',
+    focusMinutes: 25,
+    breakMinutes: 5,
+    longBreakMinutes: 15,
+    longBreakEvery: 4,
+    items: [],
+    blocks: [],
+    updatedAt: null,
+  }
+}
+
+/** GET dayplans/{date} — your plan for that day (an empty one if you haven't made it yet). */
+export async function getDayPlan({ actor, store, params }) {
+  requireDayPlanner(actor)
+  const date = optionalDate(params.date, 'date')
+  if (!date) throw new HttpError(400, 'invalid_input', 'date is required')
+  const saved = await store.get('dayPlans', dayPlanId(actor.email, date))
+  return ok({ plan: saved ? { ...emptyDayPlan(actor.email, date), ...saved } : emptyDayPlan(actor.email, date) })
+}
+
+/**
+ * POST dayplans/{date} — replace your plan for that day:
+ * { startTime, endTime, focusMinutes, breakMinutes, longBreakMinutes, longBreakEvery,
+ *   items: [{ cardId, pomodoros, done }], blocks: [{ kind, cardId, start, end }] }
+ */
+export async function saveDayPlan({ actor, store, params, body }) {
+  requireDayPlanner(actor)
+  const date = optionalDate(params.date, 'date')
+  if (!date) throw new HttpError(400, 'invalid_input', 'date is required')
+  const base = emptyDayPlan(actor.email, date)
+  if (!Array.isArray(body.items ?? [])) throw new HttpError(400, 'invalid_input', 'items must be a list')
+  if (!Array.isArray(body.blocks ?? [])) throw new HttpError(400, 'invalid_input', 'blocks must be a list')
+  const items = (body.items ?? []).slice(0, 40).map((i, n) => ({
+    cardId: shortId(i?.cardId, `items[${n}].cardId`),
+    pomodoros: wholeNumber(i?.pomodoros, `items[${n}].pomodoros`, { min: 0, max: 32, fallback: 1 }),
+    done: wholeNumber(i?.done, `items[${n}].done`, { min: 0, max: 64, fallback: 0 }),
+  }))
+  if (new Set(items.map((i) => i.cardId)).size !== items.length) throw new HttpError(400, 'invalid_input', 'a task appears twice in items')
+  const blocks = (body.blocks ?? []).slice(0, 120).map((b, n) => {
+    if (!['focus', 'break', 'long'].includes(b?.kind)) throw new HttpError(400, 'invalid_input', `blocks[${n}].kind must be focus, break or long`)
+    return {
+      kind: b.kind,
+      cardId: b.kind === 'focus' ? shortId(b.cardId, `blocks[${n}].cardId`) : null,
+      start: hhmm(b.start, `blocks[${n}].start`),
+      end: hhmm(b.end, `blocks[${n}].end`),
+    }
+  })
+  const plan = await store.put('dayPlans', {
+    ...base,
+    startTime: hhmm(body.startTime, 'startTime', base.startTime),
+    endTime: hhmm(body.endTime, 'endTime', base.endTime),
+    focusMinutes: wholeNumber(body.focusMinutes, 'focusMinutes', { min: 5, max: 90, fallback: base.focusMinutes }),
+    breakMinutes: wholeNumber(body.breakMinutes, 'breakMinutes', { min: 1, max: 30, fallback: base.breakMinutes }),
+    longBreakMinutes: wholeNumber(body.longBreakMinutes, 'longBreakMinutes', { min: 5, max: 60, fallback: base.longBreakMinutes }),
+    longBreakEvery: wholeNumber(body.longBreakEvery, 'longBreakEvery', { min: 2, max: 8, fallback: base.longBreakEvery }),
+    items,
+    blocks,
+    updatedAt: new Date().toISOString(),
+  })
+  return ok({ plan }, 200, {
+    action: 'dayplan.save',
+    summary: `planned ${date}: ${items.length} task${items.length === 1 ? '' : 's'}, ${blocks.filter((b) => b.kind === 'focus').length} pomodoros`,
   })
 }
 

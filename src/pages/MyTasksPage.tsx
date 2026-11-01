@@ -8,6 +8,7 @@ import { useVisiblePeople } from '../lib/people'
 import { useAutoRefresh } from '../lib/useAutoRefresh'
 import Board from '../components/Board'
 import CardDrawer from '../components/CardDrawer'
+import TodayPlanner from '../components/TodayPlanner'
 import { ErrorNote, PageHeader, Spinner } from '../components/ui'
 
 /** Done tasks pile up; the overall board shows only the most recent ones. */
@@ -149,6 +150,10 @@ export default function MyTasksPage() {
         </label>
         <span className="ml-auto text-xs text-fg-subtle">Sorted by due date · Done shows the latest {DONE_SHOWN}</span>
       </div>
+
+      {who === me.email && me.canEdit && me.type === 'user' && cards && (
+        <TodayPlanner email={me.email} cards={cards} onOpen={(id) => setParam('card', id)} onCardsChanged={() => void load(true)} />
+      )}
 
       <ErrorNote message={error} />
 
