@@ -1387,13 +1387,17 @@ export async function saveDayPlan({ actor, store, params, body }) {
   }))
   if (new Set(items.map((i) => i.cardId)).size !== items.length) throw new HttpError(400, 'invalid_input', 'a task appears twice in items')
   const blocks = (body.blocks ?? []).slice(0, 120).map((b, n) => {
-    if (!['focus', 'break', 'long'].includes(b?.kind)) throw new HttpError(400, 'invalid_input', `blocks[${n}].kind must be focus, break or long`)
-    return {
+    if (!['focus', 'break', 'long', 'work'].includes(b?.kind)) throw new HttpError(400, 'invalid_input', `blocks[${n}].kind must be focus, break, long or work`)
+    // A work block marks time set aside for something other than one task (e.g. "personal" for a personal break).
+    if (b.kind === 'work' && !(typeof b.tag === 'string' && /^[a-z0-9-]{1,32}$/.test(b.tag)))
+      throw new HttpError(400, 'invalid_input', `blocks[${n}].tag must be a short lowercase name`)
+    const block = {
       kind: b.kind,
       cardId: b.kind === 'focus' ? shortId(b.cardId, `blocks[${n}].cardId`) : null,
       start: hhmm(b.start, `blocks[${n}].start`),
       end: hhmm(b.end, `blocks[${n}].end`),
     }
+    return b.kind === 'work' ? { ...block, tag: b.tag } : block
   })
   const plan = await store.put('dayPlans', {
     ...base,

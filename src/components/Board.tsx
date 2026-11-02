@@ -13,6 +13,7 @@ import {
   useSensors,
   type CollisionDetection,
   type DragEndEvent,
+  type DragMoveEvent,
   type DragOverEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
@@ -21,8 +22,22 @@ import { CSS } from '@dnd-kit/utilities'
 import { AlertTriangle, CalendarDays, CheckSquare, Clock, Folder, MessageSquare, Plus } from 'lucide-react'
 import { COLUMNS, COLUMN_LABELS, formatDue, formatHours, isOverdue, type Card, type Column, type Person } from '../lib/api'
 import { AvatarStack, LabelChips } from './pickers'
+import { pointerOf, type Point } from '../lib/pointer'
 
 type Lanes = Record<Column, string[]>
+
+/**
+ * A drop target outside the board (the day plan on My tasks). Dnd-kit drop zones
+ * only work inside one DndContext, so the board asks this target about the pointer
+ * itself; a drop it accepts hands the card over instead of moving it.
+ */
+export type ExternalDrop = {
+  /** Whether the pointer is over the target (false when it isn't on screen, e.g. collapsed). */
+  accepts: (p: Point) => boolean
+  /** The pointer while it's over the target, or null once it leaves. */
+  onHover: (p: Point | null) => void
+  onDrop: (cardId: string, p: Point) => void
+}
 
 const ORDER_STEP = 1000
 
@@ -60,6 +75,7 @@ export default function Board({
   onCreate,
   canEdit,
   showProject = false,
+  externalDrop,
 }: {
   cards: Card[]
   people: Person[]
@@ -71,11 +87,13 @@ export default function Board({
   onCreate?: (column: Column, title: string) => Promise<void>
   /** Name each card's project (boards that mix projects). */
   showProject?: boolean
+  externalDrop?: ExternalDrop
 }) {
   const byId = useMemo(() => Object.fromEntries(cards.map((c) => [c.id, c])), [cards])
   const settled = useMemo(() => lanesFrom(cards), [cards])
   const [dragLanes, setDragLanes] = useState<Lanes | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [overExternal, setOverExternal] = useState(false)
   const lanes = dragLanes ?? settled
 
   /**
@@ -105,9 +123,19 @@ export default function Board({
     setDragLanes(settled)
   }
 
+  const setExternal = (p: Point | null) => {
+    const over = !!p && !!externalDrop?.accepts(p)
+    if (over !== overExternal) setOverExternal(over)
+    if (over || overExternal) externalDrop?.onHover(over ? p : null)
+  }
+
+  const onDragMove = (e: DragMoveEvent) => {
+    if (externalDrop) setExternal(pointerOf(e))
+  }
+
   // Moving into another column: re-home the card there right away so the lane opens a gap.
   const onDragOver = ({ active, over }: DragOverEvent) => {
-    if (!over || !dragLanes) return
+    if (!over || !dragLanes || overExternal) return
     const from = laneOf(dragLanes, String(active.id))
     const to = laneOf(dragLanes, String(over.id))
     if (!from || !to || from === to) return
@@ -124,11 +152,18 @@ export default function Board({
     })
   }
 
-  const onDragEnd = ({ active, over }: DragEndEvent) => {
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e
     const id = String(active.id)
     let final = dragLanes
     setDragLanes(null)
     setActiveId(null)
+    setExternal(null)
+    const point = pointerOf(e)
+    if (externalDrop && point && externalDrop.accepts(point)) {
+      externalDrop.onDrop(id, point)
+      return
+    }
     if (!final || !over) return
 
     const col = laneOf(final, id)
@@ -168,11 +203,13 @@ export default function Board({
       sensors={canEdit ? sensors : noSensors}
       collisionDetection={collide}
       onDragStart={onDragStart}
+      onDragMove={onDragMove}
       onDragOver={onDragOver}
       onDragEnd={onDragEnd}
       onDragCancel={() => {
         setDragLanes(null)
         setActiveId(null)
+        setExternal(null)
       }}
     >
       <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-4">

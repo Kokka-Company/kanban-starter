@@ -608,6 +608,12 @@ await test('day plans: private to each person, validated, and saved per day', as
   assert.equal((await bad({ startTime: '25:00' })).status, 400)
   assert.equal((await bad({ items: [{ cardId: 'x' }, { cardId: 'x' }] })).status, 400)
   assert.equal((await bad({ blocks: [{ kind: 'nap', start: '09:00', end: '09:10' }] })).status, 400)
+  assert.equal((await bad({ blocks: [{ kind: 'work', start: '09:00', end: '11:00' }] })).status, 400, 'a work block needs a tag')
+  assert.equal((await bad({ blocks: [{ kind: 'work', tag: 'Personal Break!', start: '09:00', end: '11:00' }] })).status, 400)
+  const work = await call('POST /dayplans/{date}', { as: ME, params: { date }, body: { ...body, blocks: [...body.blocks, { kind: 'work', tag: 'personal', cardId: 'ignored', start: '09:00', end: '11:00' }] } })
+  assert.equal(work.status, 200)
+  assert.deepEqual(work.body.plan.blocks[2], { kind: 'work', cardId: null, start: '09:00', end: '11:00', tag: 'personal' })
+  assert.equal(work.body.plan.blocks[0].tag, undefined, 'only work blocks carry a tag')
   assert.equal((await call('GET /dayplans/{date}', { as: ME, params: { date: 'today' } })).status, 400)
 })
 

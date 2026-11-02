@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { AlertTriangle, CalendarClock, Clock, ListTodo } from 'lucide-react'
 import { api, errorMessage, formatHours, isOverdue, type Card, type Column } from '../lib/api'
@@ -6,9 +6,9 @@ import { useMe } from '../lib/me'
 import { useLabels } from '../lib/labels'
 import { useVisiblePeople } from '../lib/people'
 import { useAutoRefresh } from '../lib/useAutoRefresh'
-import Board from '../components/Board'
+import Board, { type ExternalDrop } from '../components/Board'
 import CardDrawer from '../components/CardDrawer'
-import TodayPlanner from '../components/TodayPlanner'
+import TodayPlanner, { type PlannerDropHandle } from '../components/TodayPlanner'
 import { ErrorNote, PageHeader, Spinner } from '../components/ui'
 
 /** Done tasks pile up; the overall board shows only the most recent ones. */
@@ -34,6 +34,7 @@ export default function MyTasksPage() {
   const [overdueOnly, setOverdueOnly] = useState(false)
   const [delayedOnly, setDelayedOnly] = useState(false)
   const [error, setError] = useState('')
+  const planner = useRef<PlannerDropHandle>(null)
 
   const load = useCallback(
     async (background = false) => {
@@ -99,6 +100,17 @@ export default function MyTasksPage() {
     }
   }
 
+  const showPlanner = who === me.email && me.canEdit && me.type === 'user' && !!cards
+  // Dragging a card from the board onto the day plan adds it to the day (priorities) or books a time block (schedule).
+  const toPlan: ExternalDrop = useMemo(
+    () => ({
+      accepts: (p) => !!planner.current?.accepts(p),
+      onHover: (p) => planner.current?.hover(p),
+      onDrop: (id, p) => planner.current?.drop(id, p),
+    }),
+    [],
+  )
+
   const person = people.find((p) => p.email === who)
   const title = who === me.email ? 'My tasks' : `${person?.name ?? who}'s tasks`
 
@@ -151,8 +163,8 @@ export default function MyTasksPage() {
         <span className="ml-auto text-xs text-fg-subtle">Sorted by due date · Done shows the latest {DONE_SHOWN}</span>
       </div>
 
-      {who === me.email && me.canEdit && me.type === 'user' && cards && (
-        <TodayPlanner email={me.email} cards={cards} onOpen={(id) => setParam('card', id)} onCardsChanged={() => void load(true)} />
+      {showPlanner && (
+        <TodayPlanner dropRef={planner} email={me.email} cards={cards} onOpen={(id) => setParam('card', id)} onCardsChanged={() => void load(true)} />
       )}
 
       <ErrorNote message={error} />
@@ -167,6 +179,7 @@ export default function MyTasksPage() {
           people={people}
           canEdit={me.canEdit}
           showProject
+          externalDrop={showPlanner ? toPlan : undefined}
           onOpen={(id) => setParam('card', id)}
           onMove={(id, column) => void move(id, column)}
         />

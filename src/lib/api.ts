@@ -212,10 +212,13 @@ export interface DayPlanItem {
 
 /** A slot on the day's timeline, "HH:MM" local times. */
 export interface DayBlock {
-  kind: 'focus' | 'break' | 'long'
+  /** `work` is time set aside, e.g. a personal break (see lib/workTags); Auto-plan keeps it free. */
+  kind: 'focus' | 'break' | 'long' | 'work'
   cardId: string | null
   start: string
   end: string
+  /** Work blocks only: what the time is for, e.g. "personal". */
+  tag?: string
 }
 
 export interface DayPlan {

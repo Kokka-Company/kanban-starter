@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
+import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type Ref } from 'react'
+import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent, type DragMoveEvent } from '@dnd-kit/core'
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import {
@@ -22,8 +22,11 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
-import { addDays, api, errorMessage, formatDue, isOverdue, todayISO, type Card, type DayPlan, type DayPlanItem } from '../lib/api'
-import { autoPlan, byUrgency, formatClock, nowMinutes, schedule, scheduleStart, suggestedPomodoros, toMinutes } from '../lib/dayplan'
+import { addDays, api, errorMessage, formatDue, formatHours, isOverdue, todayISO, type Card, type DayBlock, type DayPlan, type DayPlanItem } from '../lib/api'
+import { autoPlan, byStart, byUrgency, estimateFollows, estimateFor, formatClock, fromMinutes, nowMinutes, placeFocus, placeWork, schedule, scheduleStart, suggestedPomodoros, timelineRange, toMinutes } from '../lib/dayplan'
+import { inside, pointerOf, type Point } from '../lib/pointer'
+import { WORK_TAGS, workTag } from '../lib/workTags'
+import { useMe } from '../lib/me'
 import { MODE_LABELS, formatTimer, usePomodoro } from '../lib/usePomodoro'
 import { ErrorNote, Spinner } from './ui'
 
@@ -33,6 +36,19 @@ const PX_PER_MIN = 1.15
 /** Room above the first hour line so its label isn't cut off. */
 const PAD = 10
 const COLLAPSE_KEY = 'kanban.today.collapsed'
+/** Time blocks snap to this many minutes. */
+const SNAP = 5
+/** Set-aside blocks (e.g. a personal break) move and resize in quarter hours. */
+const WORK_SNAP = 15
+
+/** What My tasks' board needs to drop cards onto the day plan. */
+export type PlannerDropHandle = {
+  /** Whether the pointer is over the priorities list or the schedule. */
+  accepts: (p: Point) => boolean
+  hover: (p: Point | null) => void
+  /** On the list: add the card at the row nearest the pointer. On the schedule: book a time block there. */
+  drop: (cardId: string, p: Point) => void
+}
 
 function readCollapsed() {
   try {
@@ -67,13 +83,16 @@ export default function TodayPlanner({
   cards,
   onOpen,
   onCardsChanged,
+  dropRef,
 }: {
   email: string
   /** Everything assigned to you (open and done). */
   cards: Card[]
   onOpen: (cardId: string) => void
   onCardsChanged: () => void
+  dropRef?: Ref<PlannerDropHandle>
 }) {
+  const { me } = useMe()
   const [date, setDate] = useState(todayISO)
   const [plan, setPlan] = useState<DayPlan | null>(null)
   const [error, setError] = useState('')
@@ -147,6 +166,35 @@ export default function TodayPlanner({
   const isToday = date === todayISO()
   const nextCardId = items.find((i) => i.done < i.pomodoros && byId.get(i.cardId)?.column !== 'done')?.cardId ?? null
 
+  // Pomodoros drive the estimate: extend a task or finish it early and its estimate follows.
+  const byIdRef = useRef(byId)
+  byIdRef.current = byId
+  const estimateTimers = useRef(new Map<string, number>())
+  const setEstimateTo = useCallback(
+    (cardId: string, pomodoros: number, focusMinutes: number) => {
+      const card = byIdRef.current.get(cardId)
+      if (!card || pomodoros < 1) return
+      const est = estimateFor(pomodoros, focusMinutes, card.assigneeEmails.length, me.estimateBuffer)
+      // +/- clicks come in bursts; save once they stop.
+      window.clearTimeout(estimateTimers.current.get(cardId))
+      estimateTimers.current.set(
+        cardId,
+        window.setTimeout(async () => {
+          estimateTimers.current.delete(cardId)
+          if (byIdRef.current.get(cardId)?.estimateHours === est) return
+          try {
+            await api.updateCard(cardId, { estimateHours: est })
+            setNote(`${card.key || card.title}: estimate is now ${formatHours(est)} (${pomodoros} 🍅).`)
+            onCardsChanged()
+          } catch (err) {
+            setError(errorMessage(err, "Could not update the task's estimate."))
+          }
+        }, 900),
+      )
+    },
+    [me.estimateBuffer, onCardsChanged],
+  )
+
   const timer = usePomodoro({
     storageKey: `kanban.pomodoro.${email}`,
     settings: plan ?? { focusMinutes: 25, breakMinutes: 5, longBreakMinutes: 15, longBreakEvery: 4 },
@@ -154,7 +202,13 @@ export default function TodayPlanner({
     describe: (id) => (id ? byId.get(id)?.title ?? 'Task' : 'Focus session'),
     onFocusDone: (cardId) => {
       // The timer's tasks are today's; only count it if today's plan is the one on screen.
-      if (!cardId || latest.current?.date !== todayISO()) return
+      const p = latest.current
+      if (!cardId || p?.date !== todayISO()) return
+      const item = p.items.find((i) => i.cardId === cardId)
+      const card = byIdRef.current.get(cardId)
+      // Working past the planned sessions extends the task, and its estimate.
+      if (item && card && item.done + 1 > item.pomodoros && estimateFollows(card, p.focusMinutes, item.pomodoros, item.done + 1))
+        setEstimateTo(cardId, item.done + 1, p.focusMinutes)
       update((p) => ({ ...p, items: p.items.map((i) => (i.cardId === cardId ? { ...i, done: i.done + 1, pomodoros: Math.max(i.pomodoros, i.done + 1) } : i)) }))
     },
   })
@@ -168,15 +222,200 @@ export default function TodayPlanner({
     }
   }
 
-  const addItem = (cardId: string) => {
+  const addItem = (cardId: string, at?: number) => {
     const card = byId.get(cardId)
     if (!card || !plan) return
-    update((p) => ({ ...p, items: [...p.items, { cardId, pomodoros: suggestedPomodoros(card, p.focusMinutes), done: 0 }] }))
+    update((p) => {
+      if (p.items.some((i) => i.cardId === cardId)) return p
+      const item = { cardId, pomodoros: suggestedPomodoros(card, p.focusMinutes), done: 0 }
+      const index = at === undefined ? p.items.length : Math.max(0, Math.min(at, p.items.length))
+      return { ...p, items: [...p.items.slice(0, index), item, ...p.items.slice(index)] }
+    })
   }
+
+  // Cards dragged in from the board below (or from the priorities onto the schedule).
+  const dropZone = useRef<HTMLDivElement>(null)
+  const timelineBox = useRef<HTMLDivElement>(null)
+  const timelineBody = useRef<HTMLDivElement>(null)
+  const [dropHover, setDropHover] = useState<'list' | 'schedule' | null>(null)
+  const [ghost, setGhost] = useState<Ghost | null>(null)
+
+  /** The schedule time (snapped) under a pointer height. */
+  const minuteAt = (y: number) => {
+    const body = timelineBody.current
+    const p = latest.current
+    if (!body || !p) return null
+    const { lo } = timelineRange(p)
+    const m = lo + (y - body.getBoundingClientRect().top - PAD) / PX_PER_MIN
+    return Math.max(0, Math.round(m / SNAP) * SNAP)
+  }
+
+  const showHover = (zone: 'list' | 'schedule' | null, p: Point | null, tag?: string) => {
+    setDropHover(zone)
+    const m = zone === 'schedule' && p ? minuteAt(p.y) : null
+    const length = tag ? workTag(tag).defaultMinutes : (latest.current?.focusMinutes ?? 25)
+    setGhost(m === null ? null : { start: tag ? Math.round(m / WORK_SNAP) * WORK_SNAP : m, length, tag })
+  }
+
+  /** Put a focus block for the card at `start` on the schedule, adding it to the day if needed. */
+  const bookBlock = (cardId: string, start: number) => {
+    const p = latest.current
+    const card = byId.get(cardId)
+    if (!p || !card) return
+    if (card.column === 'done') {
+      setNote('That task is already done, so it stays off the schedule.')
+      return
+    }
+    const blocks = placeFocus(p.blocks, cardId, start, p.focusMinutes)
+    if (!blocks) {
+      setNote("That block won't fit before midnight.")
+      return
+    }
+    const booked = blocks.filter((b) => b.kind === 'focus' && b.cardId === cardId).length
+    const has = p.items.some((i) => i.cardId === cardId)
+    update((prev) => ({
+      ...prev,
+      blocks,
+      items: has
+        ? prev.items.map((i) => (i.cardId === cardId ? { ...i, pomodoros: Math.max(i.pomodoros, booked) } : i))
+        : [...prev.items, { cardId, pomodoros: Math.max(1, booked), done: 0 }],
+    }))
+    const placed = blocks.find((b) => b.kind === 'focus' && b.cardId === cardId && !p.blocks.includes(b))
+    const at = placed ? toMinutes(placed.start) : start
+    setNote(
+      `Booked ${formatClock(fromMinutes(at))}–${formatClock(fromMinutes(at + p.focusMinutes))} for ${card.key || card.title}.` +
+        (at !== start ? ' It slid down to the next free slot.' : ''),
+    )
+  }
+
+  const moveBlock = (index: number, start: number) => {
+    const p = latest.current
+    const b = p?.blocks[index]
+    if (!p || !b) return
+    if (b.kind === 'work') {
+      update((prev) => ({ ...prev, blocks: placeWork(prev.blocks.filter((_, i) => i !== index), b.tag!, start, toMinutes(b.end) - toMinutes(b.start)) }))
+      return
+    }
+    if (b.kind !== 'focus' || !b.cardId) return
+    const blocks = placeFocus(p.blocks.filter((_, i) => i !== index), b.cardId, start, toMinutes(b.end) - toMinutes(b.start))
+    if (!blocks) {
+      setNote("That block won't fit before midnight.")
+      return
+    }
+    update((prev) => ({ ...prev, blocks }))
+    setNote('')
+  }
+
+  const removeBlock = (index: number) => update((p) => ({ ...p, blocks: p.blocks.filter((_, i) => i !== index) }))
+
+  /** Drag a set-aside block's bottom edge: a new end time, at least a quarter hour after it starts. */
+  const resizeBlock = (index: number, end: number) =>
+    update((p) => ({
+      ...p,
+      blocks: p.blocks.map((b, i) => (i === index ? { ...b, end: fromMinutes(Math.max(toMinutes(b.start) + WORK_SNAP, Math.min(end, 23 * 60 + 59))) } : b)),
+    }))
+
+  /** Set time aside (e.g. a personal break); Auto-plan and task booking keep it free. */
+  const bookWork = (tag: string, start: number) => {
+    const p = latest.current
+    if (!p) return
+    const t = workTag(tag)
+    const blocks = placeWork(p.blocks, tag, Math.round(start / WORK_SNAP) * WORK_SNAP, t.defaultMinutes)
+    const b = blocks.find((x) => !p.blocks.includes(x))!
+    update((prev) => ({ ...prev, blocks }))
+    setNote(`${t.name} booked ${formatClock(b.start)}–${formatClock(b.end)}. Drag it to move it, or its bottom edge to resize. Press Reschedule to move pomodoros out of it.`)
+  }
+
+  // Dragging a set-aside chip (e.g. Personal Break) onto the schedule. Plain pointer events:
+  // the chip lives outside both dnd-kit contexts. A click without a drag books the next free start.
+  const [chipDrag, setChipDrag] = useState<{ tag: string; x: number; y: number } | null>(null)
+  const startChipDrag = (tag: string) => (e: React.PointerEvent) => {
+    if (e.button !== 0) return
+    e.preventDefault()
+    const x0 = e.clientX
+    const y0 = e.clientY
+    let dragging = false
+    const move = (ev: PointerEvent) => {
+      const p = { x: ev.clientX, y: ev.clientY }
+      if (!dragging && Math.hypot(p.x - x0, p.y - y0) < 4) return
+      dragging = true
+      setChipDrag({ tag, ...p })
+      showHover(inside(timelineBox.current, p) ? 'schedule' : null, p, tag)
+    }
+    const end = (ev: PointerEvent, cancelled: boolean) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+      setChipDrag(null)
+      showHover(null, null)
+      if (cancelled) return
+      const p = { x: ev.clientX, y: ev.clientY }
+      if (!dragging) {
+        const plan = latest.current
+        if (plan) bookWork(tag, scheduleStart(plan))
+      } else if (inside(timelineBox.current, p)) {
+        const m = minuteAt(p.y)
+        if (m !== null) bookWork(tag, m)
+      }
+    }
+    const up = (ev: PointerEvent) => end(ev, false)
+    const cancel = (ev: PointerEvent) => end(ev, true)
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+  }
+
+  const addItemRef = useRef(addItem)
+  addItemRef.current = addItem
+  const bookRef = useRef(bookBlock)
+  bookRef.current = bookBlock
+  useImperativeHandle(
+    dropRef,
+    () => ({
+      accepts: (p) => inside(dropZone.current, p) || inside(timelineBox.current, p),
+      hover: (p) => showHover(!p ? null : inside(timelineBox.current, p) ? 'schedule' : 'list', p),
+      drop: (cardId, p) => {
+        showHover(null, null)
+        const card = byId.get(cardId)
+        if (!card) return
+        if (inside(timelineBox.current, p)) {
+          const m = minuteAt(p.y)
+          if (m !== null) bookRef.current(cardId, m)
+          return
+        }
+        if (card.column === 'done') {
+          setNote('That task is already done, so it stays off the plan.')
+          return
+        }
+        if (items.some((i) => i.cardId === cardId)) {
+          setNote('That task is already on the plan; drag it within the list to reorder, or onto the schedule to book a time.')
+          return
+        }
+        // Insert before the first row whose middle is below the pointer.
+        const rows = Array.from(dropZone.current?.querySelectorAll('ol > li') ?? [])
+        const index = rows.findIndex((r) => {
+          const b = r.getBoundingClientRect()
+          return p.y < b.top + b.height / 2
+        })
+        addItemRef.current(cardId, index === -1 ? undefined : index)
+        setNote('')
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [byId, items],
+  )
   const removeItem = (cardId: string) =>
     update((p) => ({ ...p, items: p.items.filter((i) => i.cardId !== cardId), blocks: p.blocks.filter((b) => b.cardId !== cardId || b.kind !== 'focus') }))
-  const setPomodoros = (cardId: string, delta: number) =>
-    update((p) => ({ ...p, items: p.items.map((i) => (i.cardId === cardId ? { ...i, pomodoros: Math.max(Math.max(1, i.done), Math.min(16, i.pomodoros + delta)) } : i)) }))
+  const setPomodoros = (cardId: string, delta: number) => {
+    const p = latest.current
+    const item = p?.items.find((i) => i.cardId === cardId)
+    const card = byId.get(cardId)
+    if (!p || !item) return
+    const to = Math.max(Math.max(1, item.done), Math.min(16, item.pomodoros + delta))
+    if (to === item.pomodoros) return
+    if (card && card.column !== 'done' && estimateFollows(card, p.focusMinutes, item.pomodoros, to)) setEstimateTo(cardId, to, p.focusMinutes)
+    update((p) => ({ ...p, items: p.items.map((i) => (i.cardId === cardId ? { ...i, pomodoros: to } : i)) }))
+  }
   const move = (from: number, to: number) => update((p) => ({ ...p, items: arrayMove(p.items, from, to) }))
 
   const runAuto = () => {
@@ -185,7 +424,7 @@ export default function TodayPlanner({
     const live = plan.items.filter((i) => byId.get(i.cardId)?.column !== 'done')
     const { items: picked, blocks, left } = autoPlan({ ...plan, items: live }, open)
     const kept = plan.items.filter((i) => !live.includes(i)) // finished tasks stay listed, off the timeline
-    update((p) => ({ ...p, items: [...picked, ...kept], blocks }))
+    update((p) => ({ ...p, items: [...picked, ...kept], blocks: [...p.blocks.filter((b) => b.kind === 'work'), ...blocks].sort(byStart) }))
     const focus = blocks.filter((b) => b.kind === 'focus').length
     setNote(
       !picked.length
@@ -199,8 +438,8 @@ export default function TodayPlanner({
 
   const reschedule = () => {
     if (!plan) return
-    const { blocks, left } = schedule(plan, plan.items.filter((i) => byId.get(i.cardId)?.column !== 'done'), scheduleStart(plan))
-    update((p) => ({ ...p, blocks }))
+    const { blocks, left } = schedule(plan, plan.items.filter((i) => byId.get(i.cardId)?.column !== 'done'), scheduleStart(plan), plan.blocks.filter((b) => b.kind === 'work'))
+    update((p) => ({ ...p, blocks: [...p.blocks.filter((b) => b.kind === 'work'), ...blocks].sort(byStart) }))
     setNote(left ? `${left} pomodoro${left === 1 ? '' : 's'} didn't fit before ${formatClock(plan.endTime)}.` : '')
   }
 
@@ -211,8 +450,18 @@ export default function TodayPlanner({
   }
 
   const markDone = async (cardId: string) => {
+    const p = latest.current
+    const item = p?.items.find((i) => i.cardId === cardId)
+    const card = byId.get(cardId)
+    const patch: { column: 'done'; estimateHours?: number } = { column: 'done' }
+    // Finished in fewer sessions than planned (with the whole task on today's plan), or with no estimate yet: the estimate becomes what it took.
+    if (p && item && card && item.done > 0 && (card.estimateHours === null || (item.done < item.pomodoros && estimateFollows(card, p.focusMinutes, item.pomodoros, item.done)))) {
+      const est = estimateFor(item.done, p.focusMinutes, card.assigneeEmails.length, me.estimateBuffer)
+      if (est !== card.estimateHours) patch.estimateHours = est
+    }
     try {
-      await api.updateCard(cardId, { column: 'done' })
+      await api.updateCard(cardId, patch)
+      if (patch.estimateHours !== undefined) setNote(`${card!.key || card!.title} done in ${item!.done} 🍅; estimate is now ${formatHours(patch.estimateHours)}.`)
       onCardsChanged()
     } catch (err) {
       setError(errorMessage(err, 'Could not move the task to Done.'))
@@ -223,7 +472,21 @@ export default function TodayPlanner({
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   )
-  const onDragEnd = ({ active, over }: DragEndEvent) => {
+  // A priority row dragged across onto the schedule books a time block instead of reordering.
+  const onDragMove = (e: DragMoveEvent) => {
+    const p = pointerOf(e)
+    const over = inside(timelineBox.current, p)
+    if (over || dropHover) showHover(over ? 'schedule' : null, p)
+  }
+  const onDragEnd = (e: DragEndEvent) => {
+    const { active, over } = e
+    const p = pointerOf(e)
+    showHover(null, null)
+    if (p && inside(timelineBox.current, p)) {
+      const m = minuteAt(p.y)
+      if (m !== null) bookBlock(String(active.id), m)
+      return
+    }
     if (!over || active.id === over.id) return
     const from = items.findIndex((i) => i.cardId === active.id)
     const to = items.findIndex((i) => i.cardId === over.id)
@@ -298,14 +561,17 @@ export default function TodayPlanner({
 
               <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)_minmax(15rem,0.8fr)]">
                 {/* Priorities */}
-                <div>
-                  <h3 className="label">Priorities · drag to reorder</h3>
+                <div
+                  ref={dropZone}
+                  className={`-m-2 p-2 transition-colors ${dropHover === 'list' ? 'bg-accent/10 outline outline-2 outline-dashed outline-accent/60' : ''}`}
+                >
+                  <h3 className="label">Priorities · drag to reorder, or drop tasks here from the board</h3>
                   {items.length === 0 ? (
                     <p className="border border-dashed border-line px-3 py-6 text-center text-sm text-fg-subtle">
-                      Add tasks below, or press <strong className="text-fg">Auto-plan my day</strong> to pick your most urgent ones.
+                      Drag tasks here from the board below, add them from the list, or press <strong className="text-fg">Auto-plan my day</strong> to pick your most urgent ones.
                     </p>
                   ) : (
-                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+                    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragMove={onDragMove} onDragEnd={onDragEnd} onDragCancel={() => showHover(null, null)}>
                       <SortableContext items={items.map((i) => i.cardId)} strategy={verticalListSortingStrategy}>
                         <ol className="space-y-1.5">
                           {items.map((item, idx) => (
@@ -351,8 +617,8 @@ export default function TodayPlanner({
                 {/* Timeline */}
                 <div>
                   <div className="flex items-center justify-between">
-                    <h3 className="label">Schedule</h3>
-                    {plan.blocks.length > 0 && (
+                    <h3 className="label" title="Drop tasks from the board or the priorities to book a time; drag a block to move it">Schedule · drop tasks to book a time</h3>
+                    {plan.blocks.some((b) => b.kind !== 'work') && (
                       <button className="btn-ghost -mt-1.5 px-2 py-1 text-xs" onClick={reschedule} title="Lay out what's left from now, keeping your order">
                         <RotateCcw className="h-3.5 w-3.5" /> Reschedule from {isToday ? 'now' : 'start'}
                       </button>
@@ -365,7 +631,34 @@ export default function TodayPlanner({
                     colorOf={colorOf}
                     activeCardId={timer.mode === 'focus' && !timer.idle ? timer.cardId : null}
                     onStart={isToday ? (id) => timer.start(id) : undefined}
+                    scrollRef={timelineBox}
+                    bodyRef={timelineBody}
+                    ghost={dropHover === 'schedule' ? ghost : null}
+                    onMoveBlock={moveBlock}
+                    onRemoveBlock={removeBlock}
+                    onResizeBlock={resizeBlock}
                   />
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {Object.entries(WORK_TAGS).map(([tag, t]) => (
+                      <button
+                        key={tag}
+                        type="button"
+                        onPointerDown={startChipDrag(tag)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            bookWork(tag, scheduleStart(plan))
+                          }
+                        }}
+                        className="cursor-grab touch-none select-none border px-2.5 py-1.5 transition hover:brightness-95 active:cursor-grabbing"
+                        style={{ borderColor: `${t.accent}66`, backgroundColor: `${t.accent}14` }}
+                        title={`Drag onto the schedule to book a ${t.defaultMinutes} min ${t.name}, or click to book the next free slot`}
+                        aria-label={`Book a ${t.name}`}
+                      >
+                        <WorkTagName name={t.name} accent={t.accent} />
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Timer */}
@@ -378,7 +671,25 @@ export default function TodayPlanner({
           )}
         </>
       )}
+      {chipDrag && (
+        <div
+          className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-1/2 border bg-surface/90 px-2.5 py-1.5 shadow-lg"
+          style={{ left: chipDrag.x, top: chipDrag.y, borderColor: workTag(chipDrag.tag).accent }}
+        >
+          <WorkTagName name={workTag(chipDrag.tag).name} accent={workTag(chipDrag.tag).accent} />
+        </div>
+      )}
     </section>
+  )
+}
+
+/** A set-aside tag's name with a cup icon, in its accent colour. */
+function WorkTagName({ name, accent, small }: { name: string; accent: string; small?: boolean }) {
+  return (
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap font-medium ${small ? 'text-[11px]' : 'text-xs'}`} style={{ color: accent }}>
+      <Coffee className={small ? 'h-3 w-3' : 'h-3.5 w-3.5'} />
+      {name}
+    </span>
   )
 }
 
@@ -499,6 +810,9 @@ function PriorityRow({
   )
 }
 
+/** A card being dragged over the schedule: where its block would land. */
+type Ghost = { start: number; length: number; tag?: string }
+
 function DayTimeline({
   plan,
   isToday,
@@ -506,6 +820,12 @@ function DayTimeline({
   colorOf,
   activeCardId,
   onStart,
+  scrollRef,
+  bodyRef,
+  ghost,
+  onMoveBlock,
+  onRemoveBlock,
+  onResizeBlock,
 }: {
   plan: DayPlan
   isToday: boolean
@@ -513,6 +833,14 @@ function DayTimeline({
   colorOf: Map<string, string>
   activeCardId: string | null
   onStart?: (cardId: string) => void
+  scrollRef: { current: HTMLDivElement | null }
+  bodyRef: Ref<HTMLDivElement>
+  ghost: Ghost | null
+  /** Drag a focus block to a new start time (minutes). */
+  onMoveBlock: (index: number, start: number) => void
+  onRemoveBlock: (index: number) => void
+  /** Drag a work block's bottom edge to a new end time (minutes). */
+  onResizeBlock: (index: number, end: number) => void
 }) {
   const [now, setNow] = useState(nowMinutes)
   useEffect(() => {
@@ -522,28 +850,41 @@ function DayTimeline({
   }, [isToday])
 
   const blocks = plan.blocks
-  const starts = [toMinutes(plan.startTime), ...blocks.map((b) => toMinutes(b.start))]
-  const ends = [toMinutes(plan.endTime), ...blocks.map((b) => toMinutes(b.end))]
-  const lo = Math.floor(Math.min(...starts) / 60) * 60
-  const hi = Math.min(24 * 60, Math.ceil(Math.max(...ends) / 60) * 60)
+  const { lo, hi } = timelineRange(plan)
   const height = (hi - lo) * PX_PER_MIN
   const hours = Array.from({ length: (hi - lo) / 60 + 1 }, (_, i) => lo + i * 60)
 
   // Bring the part of the day that matters into view: now, or the first session.
-  const scroller = useRef<HTMLDivElement>(null)
+  const scroller = useRef<HTMLDivElement | null>(null)
+  const setScroller = (el: HTMLDivElement | null) => {
+    scroller.current = el
+    scrollRef.current = el
+  }
   const firstStart = blocks[0]?.start
   useEffect(() => {
     const target = isToday ? Math.min(nowMinutes(), firstStart ? toMinutes(firstStart) : Infinity) : firstStart ? toMinutes(firstStart) : null
     if (scroller.current && target !== null && Number.isFinite(target)) scroller.current.scrollTop = Math.max(0, PAD + (target - lo) * PX_PER_MIN - 40)
-  }, [isToday, firstStart, lo, plan.date])
+    // Only when the day or its first session changes, not on every edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isToday, firstStart, plan.date])
+
+  // Dragging a block up or down (mouse and pen; touch keeps scrolling the schedule).
+  const [moving, setMoving] = useState<{ index: number; y0: number; shift: number } | null>(null)
+  const [resizing, setResizing] = useState<{ index: number; y0: number; shift: number } | null>(null)
+  const moved = useRef(false)
+  const shiftOf = (dy: number, snap = SNAP) => Math.round(dy / PX_PER_MIN / snap) * snap
+
+  // Set-aside blocks sit behind the pomodoros; a pomodoro placed inside one is inset so the band shows.
+  const work = blocks.map((b, i) => ({ b, i })).filter(({ b }) => b.kind === 'work')
+  const inWork = (b: DayBlock) => work.some(({ b: w }) => toMinutes(w.start) < toMinutes(b.end) && toMinutes(b.start) < toMinutes(w.end))
 
   // A task's first `done` sessions on the timeline show as finished.
   const doneOf = new Map(plan.items.map((i) => [i.cardId, i.done]))
   const counted = new Map<string, number>()
 
   return (
-    <div ref={scroller} className="relative max-h-[34rem] overflow-y-auto border border-line bg-canvas">
-      <div className="relative" style={{ height: height + PAD * 2 }}>
+    <div ref={setScroller} className={`relative max-h-[34rem] overflow-y-auto border bg-canvas transition-colors ${ghost ? 'border-accent/60' : 'border-line'}`}>
+      <div ref={bodyRef} className="relative" style={{ height: height + PAD * 2 }}>
         {hours.map((m) => (
           <div key={m} className="absolute inset-x-0 border-t border-line/70" style={{ top: PAD + (m - lo) * PX_PER_MIN }}>
             <span className="absolute left-1 -translate-y-1/2 bg-surface/90 px-0.5 font-mono text-[10px] text-fg-subtle">{formatClock(`${String(Math.floor(m / 60) % 24).padStart(2, '0')}:00`)}</span>
@@ -554,17 +895,102 @@ function DayTimeline({
           className="absolute left-14 right-1 bg-accent/[0.04]"
           style={{ top: PAD + (toMinutes(plan.startTime) - lo) * PX_PER_MIN, height: Math.max(0, toMinutes(plan.endTime) - toMinutes(plan.startTime)) * PX_PER_MIN }}
         />
-        {blocks.length === 0 && (
-          <p className="absolute inset-x-14 top-6 text-center text-xs text-fg-subtle">Press Auto-plan to lay your tasks out here.</p>
+        {blocks.length === 0 && !ghost && (
+          <p className="absolute inset-x-14 top-6 text-center text-xs text-fg-subtle">Press Auto-plan, or drag a task here to book a time.</p>
         )}
+        {work.map(({ b, i }) => {
+          const t = workTag(b.tag)
+          const shift = moving?.index === i ? moving.shift : 0
+          const grow = resizing?.index === i ? resizing.shift : 0
+          const start = toMinutes(b.start) + shift
+          const end = Math.max(toMinutes(b.start) + WORK_SNAP, toMinutes(b.end) + grow) + shift
+          const range = `${formatClock(fromMinutes(start))}–${formatClock(fromMinutes(end))}`
+          return (
+            <div
+              key={`w${i}`}
+              onPointerDown={(e) => {
+                if (e.button !== 0 || e.pointerType === 'touch') return
+                e.currentTarget.setPointerCapture(e.pointerId)
+                moved.current = false
+                setMoving({ index: i, y0: e.clientY, shift: 0 })
+              }}
+              onPointerMove={(e) => {
+                if (moving?.index !== i) return
+                const dy = e.clientY - moving.y0
+                if (Math.abs(dy) > 4) moved.current = true
+                const s = shiftOf(dy, WORK_SNAP)
+                if (s !== moving.shift) setMoving({ ...moving, shift: s })
+              }}
+              onPointerUp={() => {
+                if (moving?.index !== i) return
+                setMoving(null)
+                if (moved.current && moving.shift) onMoveBlock(i, toMinutes(b.start) + moving.shift)
+                moved.current = false
+              }}
+              onPointerCancel={() => setMoving(null)}
+              title={`${t.name} · ${range} · drag to move, drag the bottom edge to resize`}
+              className={`group absolute left-14 right-1 select-none border-l-[3px] ${shift || grow ? 'z-20 cursor-grabbing' : 'cursor-grab'}`}
+              style={{
+                top: PAD + (start - lo) * PX_PER_MIN,
+                height: Math.max(6, (end - start) * PX_PER_MIN - 2),
+                borderLeftColor: t.accent,
+                backgroundColor: `${t.accent}12`,
+                backgroundImage: `repeating-linear-gradient(135deg, ${t.accent}0d 0 6px, transparent 6px 12px)`,
+                outline: `1px solid ${t.accent}33`,
+              }}
+            >
+              <span className="flex items-center gap-1.5 px-1.5 pt-1">
+                <WorkTagName name={t.name} accent={t.accent} small />
+                <span className="truncate font-mono text-[10px] text-fg-subtle">{range}</span>
+              </span>
+              <button
+                type="button"
+                className="absolute right-0.5 top-0.5 z-10 hidden p-0.5 text-fg-subtle hover:text-fg group-hover:block"
+                aria-label={`Remove this ${t.name}`}
+                title={`Remove this ${t.name}`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => onRemoveBlock(i)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+              {/* Bottom edge: drag to resize. */}
+              <div
+                className="absolute inset-x-0 -bottom-1 z-10 h-2.5 cursor-ns-resize"
+                onPointerDown={(e) => {
+                  e.stopPropagation()
+                  if (e.button !== 0) return
+                  e.currentTarget.setPointerCapture(e.pointerId)
+                  setResizing({ index: i, y0: e.clientY, shift: 0 })
+                }}
+                onPointerMove={(e) => {
+                  if (resizing?.index !== i) return
+                  const s = shiftOf(e.clientY - resizing.y0, WORK_SNAP)
+                  if (s !== resizing.shift) setResizing({ ...resizing, shift: s })
+                }}
+                onPointerUp={(e) => {
+                  e.stopPropagation()
+                  if (resizing?.index !== i) return
+                  setResizing(null)
+                  if (resizing.shift) onResizeBlock(i, toMinutes(b.end) + resizing.shift)
+                }}
+                onPointerCancel={() => setResizing(null)}
+              >
+                <span className="mx-auto mt-1 block h-0.5 w-8 opacity-0 transition group-hover:opacity-100" style={{ backgroundColor: t.accent }} />
+              </div>
+            </div>
+          )
+        })}
         {blocks.map((b, i) => {
-          const top = PAD + (toMinutes(b.start) - lo) * PX_PER_MIN
+          if (b.kind === 'work') return null
+          const shift = moving?.index === i ? moving.shift : 0
+          const start = toMinutes(b.start) + shift
+          const top = PAD + (start - lo) * PX_PER_MIN
           const h = Math.max(4, (toMinutes(b.end) - toMinutes(b.start)) * PX_PER_MIN - 2)
           if (b.kind !== 'focus') {
             return (
               <div
                 key={i}
-                className="absolute left-14 right-1 flex items-center gap-1 overflow-hidden px-2 text-[10px] text-fg-subtle"
+                className={`absolute ${inWork(b) ? 'left-[4.75rem] right-2' : 'left-14 right-1'} flex items-center gap-1 overflow-hidden px-2 text-[10px] text-fg-subtle`}
                 style={{ top, height: h, backgroundImage: 'repeating-linear-gradient(135deg, rgba(0,0,0,0.05) 0 4px, transparent 4px 8px)' }}
               >
                 {h >= 12 && (
@@ -582,25 +1008,89 @@ function DayTimeline({
           const finished = n <= (doneOf.get(b.cardId!) ?? 0)
           const live = isToday && now >= toMinutes(b.start) && now < toMinutes(b.end)
           const past = isToday && now >= toMinutes(b.end)
+          const canStart = !!onStart && !!card && card.column !== 'done'
+          const start_ = () => {
+            if (canStart && b.cardId) onStart!(b.cardId)
+          }
           return (
-            <button
+            <div
               key={i}
-              type="button"
-              disabled={!onStart || !card || card.column === 'done'}
-              onClick={() => b.cardId && onStart?.(b.cardId)}
-              title={`${formatClock(b.start)}–${formatClock(b.end)} · ${card?.title ?? 'Task'}${onStart ? ' · click to start the timer' : ''}`}
-              className={`absolute left-14 right-1 overflow-hidden border-l-[3px] px-2 py-0.5 text-left transition hover:brightness-95 disabled:cursor-default ${past || finished ? 'opacity-50' : ''} ${live || activeCardId === b.cardId ? 'ring-1 ring-fg/40' : ''}`}
-              style={{ top, height: h, borderLeftColor: color, backgroundColor: `${color}26` }}
+              role="button"
+              tabIndex={0}
+              aria-disabled={!canStart}
+              onClick={() => {
+                if (moved.current) {
+                  moved.current = false
+                  return
+                }
+                start_()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  start_()
+                }
+              }}
+              onPointerDown={(e) => {
+                if (e.button !== 0 || e.pointerType === 'touch') return
+                e.currentTarget.setPointerCapture(e.pointerId)
+                moved.current = false
+                setMoving({ index: i, y0: e.clientY, shift: 0 })
+              }}
+              onPointerMove={(e) => {
+                if (moving?.index !== i) return
+                const dy = e.clientY - moving.y0
+                if (Math.abs(dy) > 4) moved.current = true
+                const s = shiftOf(dy)
+                if (s !== moving.shift) setMoving({ ...moving, shift: s })
+              }}
+              onPointerUp={() => {
+                if (moving?.index !== i) return
+                setMoving(null)
+                if (moved.current && moving.shift) onMoveBlock(i, toMinutes(b.start) + moving.shift)
+              }}
+              onPointerCancel={() => setMoving(null)}
+              title={`${formatClock(b.start)}–${formatClock(b.end)} · ${card?.title ?? 'Task'} · drag to move${onStart ? ', click to start the timer' : ''}`}
+              className={`group absolute ${inWork(b) ? 'left-[4.75rem] right-2' : 'left-14 right-1'} cursor-grab select-none overflow-hidden border-l-[3px] px-2 py-0.5 text-left transition hover:brightness-95 ${past || finished ? 'opacity-50' : ''} ${live || activeCardId === b.cardId ? 'ring-1 ring-fg/40' : ''} ${shift ? 'z-20 cursor-grabbing shadow-lg' : ''}`}
+              style={{ top, height: h, borderLeftColor: color, backgroundColor: `${color}26`, transition: moving?.index === i ? 'none' : undefined }}
             >
-              <span className="flex items-center gap-1.5 truncate text-[11px] leading-tight text-fg">
-                <span className="font-mono text-[10px] text-fg-subtle">{formatClock(b.start)}</span>
+              <span className="flex items-center gap-1.5 truncate pr-4 text-[11px] leading-tight text-fg">
+                <span className="font-mono text-[10px] text-fg-subtle">{formatClock(fromMinutes(start))}</span>
                 {card?.key && <span className="font-mono text-[10px]" style={{ color }}>{card.key}</span>}
                 <span className={`truncate ${card?.column === 'done' ? 'line-through opacity-60' : ''}`}>{card?.title ?? 'Task'}</span>
                 <span className="ml-auto shrink-0 font-mono text-[10px] text-fg-subtle">{finished ? '✓' : '🍅'}{n}</span>
               </span>
-            </button>
+              <button
+                type="button"
+                className="absolute right-0.5 top-0.5 hidden p-0.5 text-fg-subtle hover:text-fg group-hover:block group-focus-within:block"
+                aria-label="Remove this time block"
+                title="Remove this time block"
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRemoveBlock(i)
+                }}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
           )
         })}
+        {ghost && (
+          <div
+            className="pointer-events-none absolute left-14 right-1 z-20 border border-dashed px-2 py-0.5 font-mono text-[10px]"
+            style={{
+              top: PAD + (ghost.start - lo) * PX_PER_MIN,
+              height: Math.max(4, ghost.length * PX_PER_MIN - 2),
+              borderColor: ghost.tag ? workTag(ghost.tag).accent : '#0284C7cc',
+              backgroundColor: ghost.tag ? `${workTag(ghost.tag).accent}22` : '#0284C726',
+              color: ghost.tag ? workTag(ghost.tag).accent : '#0284C7',
+            }}
+          >
+            {ghost.tag && `${workTag(ghost.tag).name} · `}
+            {formatClock(fromMinutes(ghost.start))}–{formatClock(fromMinutes(ghost.start + ghost.length))}
+          </div>
+        )}
         {isToday && now >= lo && now <= hi && (
           <div className="pointer-events-none absolute inset-x-0 z-10 flex items-center" style={{ top: PAD + (now - lo) * PX_PER_MIN }}>
             <span className="h-2 w-2 -translate-x-0.5 rounded-full bg-red-400" />

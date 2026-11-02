@@ -74,17 +74,20 @@ export function capacity(plan: DayPlan, from: number) {
 
 /**
  * Lay the remaining pomodoros out in priority order: focus, short break, focus, …,
- * with a long break after every `longBreakEvery` focus sessions. Stops at the end
- * of the day; `left` is how many pomodoros didn't fit.
+ * with a long break after every `longBreakEvery` focus sessions. Focus sessions skip
+ * over set-aside blocks (e.g. a personal break). Stops at the end of the day; `left`
+ * is how many pomodoros didn't fit.
  */
-export function schedule(plan: DayPlan, items: DayPlanItem[], from: number): { blocks: DayBlock[]; left: number } {
+export function schedule(plan: DayPlan, items: DayPlanItem[], from: number, setAside: DayBlock[] = []): { blocks: DayBlock[]; left: number } {
   const end = toMinutes(plan.endTime)
   const blocks: DayBlock[] = []
+  const busy = setAside.map((b) => [toMinutes(b.start), toMinutes(b.end)] as const)
   let t = from
   let count = 0
   let left = 0
   for (const item of items) {
     for (let i = 0; i < Math.max(0, item.pomodoros - item.done); i++) {
+      for (let hit = busy.find(([s, e]) => s < t + plan.focusMinutes && t < e); hit; hit = busy.find(([s, e]) => s < t + plan.focusMinutes && t < e)) t = hit[1]
       if (t + plan.focusMinutes > end) {
         left++
         continue
@@ -94,7 +97,9 @@ export function schedule(plan: DayPlan, items: DayPlanItem[], from: number): { b
       count++
       const long = count % plan.longBreakEvery === 0
       const rest = long ? plan.longBreakMinutes : plan.breakMinutes
-      blocks.push({ kind: long ? 'long' : 'break', cardId: null, start: fromMinutes(t), end: fromMinutes(Math.min(t + rest, 23 * 60 + 59)) })
+      // A break that runs into set-aside time stops where it starts.
+      const cut = Math.min(t + rest, ...busy.filter(([s]) => s >= t).map(([s]) => s))
+      if (cut > t) blocks.push({ kind: long ? 'long' : 'break', cardId: null, start: fromMinutes(t), end: fromMinutes(Math.min(cut, 23 * 60 + 59)) })
       t += rest
     }
   }
@@ -122,6 +127,77 @@ export function autoPlan(plan: DayPlan, openCards: Card[]) {
       used += pomodoros
     }
   }
-  const { blocks, left } = schedule(plan, items, from)
+  const { blocks, left } = schedule(plan, items, from, plan.blocks.filter((b) => b.kind === 'work'))
   return { items, blocks, left }
+}
+
+const LAST_MINUTE = 23 * 60 + 59
+
+/** The hours the schedule shows: the working day, widened to fit every block, on whole hours. */
+export function timelineRange(plan: Pick<DayPlan, 'startTime' | 'endTime' | 'blocks'>) {
+  const starts = [toMinutes(plan.startTime), ...plan.blocks.map((b) => toMinutes(b.start))]
+  const ends = [toMinutes(plan.endTime), ...plan.blocks.map((b) => toMinutes(b.end))]
+  return { lo: Math.floor(Math.min(...starts) / 60) * 60, hi: Math.min(24 * 60, Math.ceil(Math.max(...ends) / 60) * 60) }
+}
+
+export const byStart = (a: DayBlock, b: DayBlock) => toMinutes(a.start) - toMinutes(b.start)
+
+/** A set-aside block (e.g. a personal break), clamped to the day, in time order with the rest. */
+export function placeWork(blocks: DayBlock[], tag: string, start: number, length: number): DayBlock[] {
+  const s = Math.max(0, Math.min(Math.round(start), LAST_MINUTE - length))
+  return [...blocks, { kind: 'work' as const, cardId: null, tag, start: fromMinutes(s), end: fromMinutes(s + length) }].sort(byStart)
+}
+
+/**
+ * Book a focus block for `cardId` at `start` (minutes), `length` long. If that lands on
+ * another focus block or a set-aside block (e.g. a personal break) it slides to just
+ * after it, so they never overlap; pomodoro breaks it covers are dropped. Returns the
+ * new blocks in time order, or null if it won't fit before midnight.
+ */
+export function placeFocus(blocks: DayBlock[], cardId: string, start: number, length: number): DayBlock[] | null {
+  const focus = blocks.filter((b) => b.kind === 'focus' || b.kind === 'work')
+  let s = Math.max(0, Math.round(start))
+  for (let guard = 0; guard < 200; guard++) {
+    const hit = focus.find((b) => toMinutes(b.start) < s + length && s < toMinutes(b.end))
+    if (!hit) break
+    s = toMinutes(hit.end)
+  }
+  if (s + length > LAST_MINUTE) return null
+  const covers = (b: DayBlock) => toMinutes(b.start) < s + length && s < toMinutes(b.end)
+  const block: DayBlock = { kind: 'focus', cardId, start: fromMinutes(s), end: fromMinutes(s + length) }
+  return [...blocks.filter((b) => (b.kind !== 'break' && b.kind !== 'long') || !covers(b)), block].sort(byStart)
+}
+
+/** Pomodoros your share of the task's planned time comes to (no 1–8 cap), or null with no estimate. */
+export function pomodorosFor(card: Card, focusMinutes: number) {
+  const h = myHours(card)
+  return h ? Math.ceil((h * 60) / focusMinutes) : null
+}
+
+/**
+ * The estimate (the guess, before the buffer) whose planned time comes to exactly
+ * `pomodoros` focus sessions of your share. Estimates go in 0.1 h steps, so this is
+ * the largest one that still rounds to that many sessions.
+ */
+export function estimateFor(pomodoros: number, focusMinutes: number, assignees: number, buffer: number) {
+  const n = Math.max(1, assignees)
+  const target = (pomodoros * focusMinutes * n) / 60 / buffer
+  let best: number | null = null
+  for (let e = Math.max(0.1, Math.floor(target * 10) / 10 - 0.5); e <= target + 0.5; e = Math.round((e + 0.1) * 10) / 10) {
+    const planned = Math.round(e * buffer * 10) / 10
+    if (Math.ceil(((planned / n) * 60) / focusMinutes) === pomodoros) best = e
+  }
+  return best ?? Math.max(0.1, Math.round(target * 10) / 10)
+}
+
+/**
+ * Whether changing today's pomodoros for a task should change its estimate. With no
+ * estimate, always. Adding: only once you go past what the estimate covers (a big task
+ * spread over several days keeps its estimate). Removing: only if today's plan held the
+ * whole estimate.
+ */
+export function estimateFollows(card: Card, focusMinutes: number, from: number, to: number) {
+  const full = pomodorosFor(card, focusMinutes)
+  if (full === null) return true
+  return to > from ? to > full : from === full
 }
