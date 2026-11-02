@@ -64,6 +64,22 @@ export default function Layout({ children }: { children: ReactNode }) {
         </div>
       </header>
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-4 py-6">{children}</main>
+      <footer className="border-t border-line bg-surface">
+        <div className="mx-auto max-w-[1600px] px-4 py-3 text-center text-xs text-fg-subtle">
+          <a href="https://github.com/Kokka-Company/kanban-starter" target="_blank" rel="noreferrer" className="hover:text-fg">
+            Kokka &amp; Company Open Source
+          </a>{' '}
+          · Copyright 2026 Kokka &amp; Company · Licensed under the{' '}
+          <a
+            href="https://github.com/Kokka-Company/kanban-starter/blob/main/LICENSE"
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-2 hover:text-fg"
+          >
+            Apache License 2.0
+          </a>
+        </div>
+      </footer>
     </div>
   )
 }
