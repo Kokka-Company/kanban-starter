@@ -76,7 +76,7 @@ export default function Layout({ children }: { children: ReactNode }) {
             rel="noreferrer"
             className="underline underline-offset-2 hover:text-fg"
           >
-            Apache License 2.0
+            GNU GPL v3
           </a>
         </div>
       </footer>
