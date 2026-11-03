@@ -23,7 +23,7 @@ import {
   X,
 } from 'lucide-react'
 import { addDays, api, errorMessage, formatDue, formatHours, isOverdue, todayISO, type Card, type DayBlock, type DayPlan, type DayPlanItem } from '../lib/api'
-import { autoPlan, byStart, byUrgency, estimateFollows, estimateFor, formatClock, fromMinutes, nowMinutes, placeFocus, placeWork, schedule, scheduleStart, suggestedPomodoros, timelineRange, toMinutes } from '../lib/dayplan'
+import { QUICK_MINUTES, autoPlan, byStart, byUrgency, estimateFollows, estimateFor, formatClock, fromMinutes, nowMinutes, placeFocus, placeWork, schedule, scheduleStart, suggestedPomodoros, timelineRange, toMinutes } from '../lib/dayplan'
 import { inside, pointerOf, type Point } from '../lib/pointer'
 import { WORK_TAGS, workTag } from '../lib/workTags'
 import { useMe } from '../lib/me'
@@ -204,14 +204,15 @@ export default function TodayPlanner({
     settings: plan ?? { focusMinutes: 25, breakMinutes: 5, longBreakMinutes: 15, longBreakEvery: 4 },
     nextCardId,
     describe: (id) => (id ? byId.get(id)?.title ?? 'Task' : 'Focus session'),
+    focusMinutesFor: (id) => (id && latest.current?.items.find((i) => i.cardId === id)?.quick ? QUICK_MINUTES : null),
     onFocusDone: (cardId) => {
       // The timer's tasks are today's; only count it if today's plan is the one on screen.
       const p = latest.current
       if (!cardId || p?.date !== todayISO()) return
       const item = p.items.find((i) => i.cardId === cardId)
       const card = byIdRef.current.get(cardId)
-      // Working past the planned sessions extends the task, and its estimate.
-      if (item && card && item.done + 1 > item.pomodoros && estimateFollows(card, p.focusMinutes, item.pomodoros, item.done + 1))
+      // Working past the planned sessions extends the task, and its estimate (not for 5-minute tasks).
+      if (item && card && !item.quick && item.done + 1 > item.pomodoros && estimateFollows(card, p.focusMinutes, item.pomodoros, item.done + 1))
         setEstimateTo(cardId, item.done + 1, p.focusMinutes)
       update((p) => ({ ...p, items: p.items.map((i) => (i.cardId === cardId ? { ...i, done: i.done + 1, pomodoros: Math.max(i.pomodoros, i.done + 1) } : i)) }))
     },
@@ -270,7 +271,8 @@ export default function TodayPlanner({
       setNote('That task is already done, so it stays off the schedule.')
       return
     }
-    const blocks = placeFocus(p.blocks, cardId, start, p.focusMinutes)
+    const length = p.items.find((i) => i.cardId === cardId)?.quick ? QUICK_MINUTES : p.focusMinutes
+    const blocks = placeFocus(p.blocks, cardId, start, length)
     if (!blocks) {
       setNote("That block won't fit before midnight.")
       return
@@ -287,7 +289,7 @@ export default function TodayPlanner({
     const placed = blocks.find((b) => b.kind === 'focus' && b.cardId === cardId && !p.blocks.includes(b))
     const at = placed ? toMinutes(placed.start) : start
     setNote(
-      `Booked ${formatClock(fromMinutes(at))}–${formatClock(fromMinutes(at + p.focusMinutes))} for ${card.key || card.title}.` +
+      `Booked ${formatClock(fromMinutes(at))}–${formatClock(fromMinutes(at + length))} for ${card.key || card.title}.` +
         (at !== start ? ' It slid down to the next free slot.' : ''),
     )
   }
@@ -308,6 +310,49 @@ export default function TodayPlanner({
     }
     update((prev) => ({ ...prev, blocks }))
     setNote('')
+  }
+
+  /**
+   * The 5m button on a schedule block: make the task a 5-minute task (one 5-minute session
+   * in place of its remaining pomodoros, no break after) or turn it back into pomodoros.
+   * Sessions already finished stay as they were.
+   */
+  const toggleQuick = (index: number) => {
+    const p = latest.current
+    const clicked = p?.blocks[index]
+    const cardId = clicked?.cardId
+    const item = cardId ? p?.items.find((i) => i.cardId === cardId) : undefined
+    if (!p || !clicked || !cardId || !item) return
+    const card = byId.get(cardId)
+    const mine = p.blocks.filter((b) => b.kind === 'focus' && b.cardId === cardId).sort(byStart)
+    const finished = mine.slice(0, item.done)
+    const open = mine.slice(item.done)
+    const others = p.blocks.filter((b) => !(b.kind === 'focus' && b.cardId === cardId))
+    if (!item.quick) {
+      // Keep one session (the one clicked, unless that one's already finished), 5 minutes long.
+      const keep = open.includes(clicked) ? clicked : open[0]
+      const blocks = [...others, ...finished, ...(keep ? [{ ...keep, end: fromMinutes(toMinutes(keep.start) + QUICK_MINUTES) }] : [])].sort(byStart)
+      update((prev) => ({
+        ...prev,
+        blocks,
+        items: prev.items.map((i) => (i.cardId === cardId ? { ...i, quick: true, pomodoros: i.done + 1 } : i)),
+      }))
+      setNote(`${card?.key || card?.title || 'Task'} is now a 5-minute task.`)
+      return
+    }
+    // Back to pomodoros: open sessions grow to full length, sliding past anything they'd overlap.
+    let blocks: DayBlock[] | null = [...others, ...finished].sort(byStart)
+    for (const b of open) {
+      blocks = blocks && placeFocus(blocks, cardId, toMinutes(b.start), p.focusMinutes)
+      if (!blocks) break
+    }
+    if (!blocks) {
+      setNote("A full pomodoro won't fit there before midnight.")
+      return
+    }
+    const next = blocks
+    update((prev) => ({ ...prev, blocks: next, items: prev.items.map((i) => (i.cardId === cardId ? { ...i, quick: undefined } : i)) }))
+    setNote(`${card?.key || card?.title || 'Task'} is back to ${p.focusMinutes}-minute pomodoros.`)
   }
 
   const removeBlock = (index: number) => update((p) => ({ ...p, blocks: p.blocks.filter((_, i) => i !== index) }))
@@ -417,7 +462,7 @@ export default function TodayPlanner({
     if (!p || !item) return
     const to = Math.max(Math.max(1, item.done), Math.min(16, item.pomodoros + delta))
     if (to === item.pomodoros) return
-    if (card && card.column !== 'done' && estimateFollows(card, p.focusMinutes, item.pomodoros, to)) setEstimateTo(cardId, to, p.focusMinutes)
+    if (card && card.column !== 'done' && !item.quick && estimateFollows(card, p.focusMinutes, item.pomodoros, to)) setEstimateTo(cardId, to, p.focusMinutes)
     update((p) => ({ ...p, items: p.items.map((i) => (i.cardId === cardId ? { ...i, pomodoros: to } : i)) }))
   }
   const move = (from: number, to: number) => update((p) => ({ ...p, items: arrayMove(p.items, from, to) }))
@@ -459,7 +504,7 @@ export default function TodayPlanner({
     const card = byId.get(cardId)
     const patch: { column: 'done'; estimateHours?: number } = { column: 'done' }
     // Finished in fewer sessions than planned (with the whole task on today's plan), or with no estimate yet: the estimate becomes what it took.
-    if (p && item && card && item.done > 0 && (card.estimateHours === null || (item.done < item.pomodoros && estimateFollows(card, p.focusMinutes, item.pomodoros, item.done)))) {
+    if (p && item && card && !item.quick && item.done > 0 && (card.estimateHours === null || (item.done < item.pomodoros && estimateFollows(card, p.focusMinutes, item.pomodoros, item.done)))) {
       const est = estimateFor(item.done, p.focusMinutes, card.assigneeEmails.length, me.estimateBuffer)
       if (est !== card.estimateHours) patch.estimateHours = est
     }
@@ -529,7 +574,7 @@ export default function TodayPlanner({
         )}
         {timer.running && collapsed && (
           <span className="font-mono text-xs text-accent">
-            {MODE_LABELS[timer.mode]} {formatTimer(timer.remaining)}
+            {timer.quick ? '5-min task' : MODE_LABELS[timer.mode]} {formatTimer(timer.remaining)}
           </span>
         )}
         <span className="ml-auto font-mono text-[10px] uppercase tracking-widest text-fg-subtle">
@@ -641,6 +686,7 @@ export default function TodayPlanner({
                     onMoveBlock={moveBlock}
                     onRemoveBlock={removeBlock}
                     onResizeBlock={resizeBlock}
+                    onToggleQuick={toggleQuick}
                   />
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     {Object.entries(WORK_TAGS).map(([tag, t]) => (
@@ -830,6 +876,7 @@ function DayTimeline({
   onMoveBlock,
   onRemoveBlock,
   onResizeBlock,
+  onToggleQuick,
 }: {
   plan: DayPlan
   isToday: boolean
@@ -845,6 +892,8 @@ function DayTimeline({
   onRemoveBlock: (index: number) => void
   /** Drag a work block's bottom edge to a new end time (minutes). */
   onResizeBlock: (index: number, end: number) => void
+  /** The 5m button: switch a task between 5-minute sessions and whole pomodoros. */
+  onToggleQuick: (index: number) => void
 }) {
   const [now, setNow] = useState(nowMinutes)
   useEffect(() => {
@@ -884,6 +933,7 @@ function DayTimeline({
 
   // A task's first `done` sessions on the timeline show as finished.
   const doneOf = new Map(plan.items.map((i) => [i.cardId, i.done]))
+  const quickIds = new Set(plan.items.filter((i) => i.quick).map((i) => i.cardId))
   const counted = new Map<string, number>()
 
   return (
@@ -1013,6 +1063,9 @@ function DayTimeline({
           const live = isToday && now >= toMinutes(b.start) && now < toMinutes(b.end)
           const past = isToday && now >= toMinutes(b.end)
           const canStart = !!onStart && !!card && card.column !== 'done'
+          const quick = !!b.cardId && quickIds.has(b.cardId)
+          // A 5-minute block is only a few pixels tall; give it room for its title and the 5m button.
+          const shown = quick ? Math.max(h, 18) : h
           const start_ = () => {
             if (canStart && b.cardId) onStart!(b.cardId)
           }
@@ -1055,15 +1108,35 @@ function DayTimeline({
               }}
               onPointerCancel={() => setMoving(null)}
               title={`${formatClock(b.start)}–${formatClock(b.end)} · ${card?.title ?? 'Task'} · drag to move${onStart ? ', click to start the timer' : ''}`}
-              className={`group absolute ${inWork(b) ? 'left-[4.75rem] right-2' : 'left-14 right-1'} cursor-grab select-none overflow-hidden border-l-[3px] px-2 py-0.5 text-left transition hover:brightness-95 ${past || finished ? 'opacity-50' : ''} ${live || activeCardId === b.cardId ? 'ring-1 ring-fg/40' : ''} ${shift ? 'z-20 cursor-grabbing shadow-lg' : ''}`}
-              style={{ top, height: h, borderLeftColor: color, backgroundColor: `${color}26`, transition: moving?.index === i ? 'none' : undefined }}
+              className={`group absolute ${inWork(b) ? 'left-[4.75rem] right-2' : 'left-14 right-1'} cursor-grab select-none overflow-hidden border-l-[3px] px-2 py-0.5 text-left transition hover:brightness-95 ${past || finished ? 'opacity-50' : ''} ${live || activeCardId === b.cardId ? 'ring-1 ring-fg/40' : ''} ${shift ? 'z-20 cursor-grabbing shadow-lg' : quick ? 'z-[5]' : ''}`}
+              style={{ top, height: shown, borderLeftColor: color, backgroundColor: `${color}26`, transition: moving?.index === i ? 'none' : undefined }}
             >
-              <span className="flex items-center gap-1.5 truncate pr-4 text-[11px] leading-tight text-fg">
+              <span className="flex items-center gap-1.5 truncate pr-12 text-[11px] leading-tight text-fg">
                 <span className="font-mono text-[10px] text-fg-subtle">{formatClock(fromMinutes(start))}</span>
                 {card?.key && <span className="font-mono text-[10px]" style={{ color }}>{card.key}</span>}
                 <span className={`truncate ${card?.column === 'done' ? 'line-through opacity-60' : ''}`}>{card?.title ?? 'Task'}</span>
-                <span className="ml-auto shrink-0 font-mono text-[10px] text-fg-subtle">{finished ? '✓' : '🍅'}{n}</span>
+                <span className="ml-auto shrink-0 font-mono text-[10px] text-fg-subtle">{finished ? '✓' : quick ? '' : '🍅'}{quick && !finished ? '' : n}</span>
               </span>
+              {b.cardId && card?.column !== 'done' && (
+                <button
+                  type="button"
+                  aria-pressed={quick}
+                  className={`absolute right-5 top-0.5 border px-1 font-mono text-[9px] leading-[12px] transition ${
+                    quick
+                      ? 'border-amber-500/60 bg-amber-100 text-amber-800'
+                      : 'border-line text-fg-subtle opacity-60 hover:text-fg-muted hover:opacity-100'
+                  }`}
+                  aria-label={quick ? 'Make this a full pomodoro again' : 'Make this a 5-minute task'}
+                  title={quick ? `5-minute task · click to go back to a ${plan.focusMinutes}-minute pomodoro` : `Make this a 5-minute task instead of a ${plan.focusMinutes}-minute pomodoro`}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onToggleQuick(i)
+                  }}
+                >
+                  5m
+                </button>
+              )}
               <button
                 type="button"
                 className="absolute right-0.5 top-0.5 hidden p-0.5 text-fg-subtle hover:text-fg group-hover:block group-focus-within:block"
@@ -1115,7 +1188,7 @@ function PomodoroPanel({ timer, card, color }: { timer: ReturnType<typeof usePom
     <div className="flex flex-col items-center border border-line bg-canvas px-4 py-5">
       <span className={`mb-2 inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.14em] ${timer.mode === 'focus' ? 'text-accent' : 'text-emerald-700'}`}>
         {timer.mode === 'focus' ? <Timer className="h-3.5 w-3.5" /> : <Coffee className="h-3.5 w-3.5" />}
-        {MODE_LABELS[timer.mode]}
+        {timer.quick ? '5-minute task' : MODE_LABELS[timer.mode]}
       </span>
       <div className="relative h-36 w-36">
         <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90" aria-hidden="true">

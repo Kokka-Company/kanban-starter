@@ -208,6 +208,8 @@ export interface DayPlanItem {
   pomodoros: number
   /** Pomodoros finished on it today. */
   done: number
+  /** A 5-minute task: each session is 5 minutes (QUICK_MINUTES) with no break after. */
+  quick?: boolean
 }
 
 /** A slot on the day's timeline, "HH:MM" local times. */

@@ -1387,7 +1387,7 @@ async function rollover(store, email, date) {
   for (const item of prev.items) {
     const card = await store.get('cards', item.cardId)
     if (!card || card.column === 'done' || card.archived) continue
-    items.push({ cardId: item.cardId, pomodoros: Math.max(1, item.pomodoros - item.done), done: 0 })
+    items.push({ cardId: item.cardId, pomodoros: Math.max(1, item.pomodoros - item.done), done: 0, ...(item.quick ? { quick: true } : {}) })
   }
   return items.length ? { items, rolledFrom: prev.date } : {}
 }
@@ -1395,7 +1395,7 @@ async function rollover(store, email, date) {
 /**
  * POST dayplans/{date} — replace your plan for that day:
  * { startTime, endTime, focusMinutes, breakMinutes, longBreakMinutes, longBreakEvery,
- *   items: [{ cardId, pomodoros, done }], blocks: [{ kind, cardId, start, end }] }
+ *   items: [{ cardId, pomodoros, done, quick? }], blocks: [{ kind, cardId, start, end }] }
  */
 export async function saveDayPlan({ actor, store, params, body }) {
   requireDayPlanner(actor)
@@ -1408,6 +1408,8 @@ export async function saveDayPlan({ actor, store, params, body }) {
     cardId: shortId(i?.cardId, `items[${n}].cardId`),
     pomodoros: wholeNumber(i?.pomodoros, `items[${n}].pomodoros`, { min: 0, max: 32, fallback: 1 }),
     done: wholeNumber(i?.done, `items[${n}].done`, { min: 0, max: 64, fallback: 0 }),
+    // A 5-minute task: its sessions are 5 minutes with no break after, not whole pomodoros.
+    ...(i?.quick === true ? { quick: true } : {}),
   }))
   if (new Set(items.map((i) => i.cardId)).size !== items.length) throw new HttpError(400, 'invalid_input', 'a task appears twice in items')
   const blocks = (body.blocks ?? []).slice(0, 120).map((b, n) => {

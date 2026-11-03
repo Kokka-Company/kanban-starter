@@ -590,7 +590,7 @@ await test('day plans: private to each person, validated, and saved per day', as
 
   const body = {
     startTime: '08:30',
-    items: [{ cardId: 'c1', pomodoros: 2, done: 1 }, { cardId: 'c2', pomodoros: 1 }],
+    items: [{ cardId: 'c1', pomodoros: 2, done: 1 }, { cardId: 'c2', pomodoros: 1, quick: true }],
     blocks: [
       { kind: 'focus', cardId: 'c1', start: '08:30', end: '08:55' },
       { kind: 'break', start: '08:55', end: '09:00' },
@@ -600,6 +600,8 @@ await test('day plans: private to each person, validated, and saved per day', as
   assert.equal(saved.status, 200)
   assert.equal(saved.body.plan.startTime, '08:30')
   assert.equal(saved.body.plan.items[1].done, 0)
+  assert.equal(saved.body.plan.items[1].quick, true, 'a 5-minute task keeps its flag')
+  assert.equal(saved.body.plan.items[0].quick, undefined, 'only 5-minute tasks carry the flag')
   assert.equal(saved.body.plan.blocks[1].cardId, null)
   assert.equal((await call('GET /dayplans/{date}', { as: ME, params: { date } })).body.plan.items.length, 2)
   assert.equal((await call('GET /dayplans/{date}', { as: ADMIN, params: { date } })).body.plan.items.length, 0, "an admin sees their own plan, not someone else's")
@@ -622,14 +624,14 @@ await test('day plans: unfinished tasks roll over to the next day you open', asy
   await call('POST /members', { as: ADMIN, body: { email: ME, name: 'Roller', workspaceIds: ['alpha-team'] } })
   const project = (await call('POST /workspaces/{id}/projects', { as: ME, params: { id: 'alpha-team' }, body: { name: 'Roll' } })).body.project
   const add = async (title) => (await call('POST /projects/{id}/cards', { as: ME, params: { id: project.id }, body: { title, column: 'todo' } })).body.card
-  const [open, quick, finished] = [await add('Open'), await add('Small'), await add('Finished')]
+  const [open, quick, finished] = [await add('Open'), await add('Quick'), await add('Finished')]
   await call('POST /dayplans/{date}', {
     as: ME,
     params: { date: '2026-11-02' },
     body: {
       items: [
         { cardId: open.id, pomodoros: 3, done: 1 },
-        { cardId: quick.id, pomodoros: 1, done: 0 },
+        { cardId: quick.id, pomodoros: 1, done: 0, quick: true },
         { cardId: finished.id, pomodoros: 2, done: 2 },
         { cardId: 'gone', pomodoros: 1, done: 0 },
       ],
@@ -642,7 +644,7 @@ await test('day plans: unfinished tasks roll over to the next day you open', asy
   assert.equal(next.rolledFrom, '2026-11-02')
   assert.deepEqual(next.items, [
     { cardId: open.id, pomodoros: 2, done: 0 },
-    { cardId: quick.id, pomodoros: 1, done: 0 },
+    { cardId: quick.id, pomodoros: 1, done: 0, quick: true },
   ], 'open tasks carry their remaining pomodoros; done and missing tasks stay behind')
   assert.deepEqual(next.blocks, [], 'times are not carried over')
   assert.equal(next.updatedAt, null, 'nothing is saved until the day is changed')

@@ -1,5 +1,8 @@
 import { addDays, isOverdue, todayISO, type Card, type DayBlock, type DayPlan, type DayPlanItem } from './api'
 
+/** How long a 5-minute task's session is. */
+export const QUICK_MINUTES = 5
+
 /** "09:30" → 570 */
 export function toMinutes(hhmm: string) {
   const [h, m] = hhmm.split(':').map(Number)
@@ -87,13 +90,16 @@ export function schedule(plan: DayPlan, items: DayPlanItem[], from: number, setA
   let left = 0
   for (const item of items) {
     for (let i = 0; i < Math.max(0, item.pomodoros - item.done); i++) {
-      for (let hit = busy.find(([s, e]) => s < t + plan.focusMinutes && t < e); hit; hit = busy.find(([s, e]) => s < t + plan.focusMinutes && t < e)) t = hit[1]
-      if (t + plan.focusMinutes > end) {
+      const length = item.quick ? QUICK_MINUTES : plan.focusMinutes
+      for (let hit = busy.find(([s, e]) => s < t + length && t < e); hit; hit = busy.find(([s, e]) => s < t + length && t < e)) t = hit[1]
+      if (t + length > end) {
         left++
         continue
       }
-      blocks.push({ kind: 'focus', cardId: item.cardId, start: fromMinutes(t), end: fromMinutes(t + plan.focusMinutes) })
-      t += plan.focusMinutes
+      blocks.push({ kind: 'focus', cardId: item.cardId, start: fromMinutes(t), end: fromMinutes(t + length) })
+      t += length
+      // A 5-minute task runs straight into the next session: no break, and it doesn't count toward the long one.
+      if (item.quick) continue
       count++
       const long = count % plan.longBreakEvery === 0
       const rest = long ? plan.longBreakMinutes : plan.breakMinutes

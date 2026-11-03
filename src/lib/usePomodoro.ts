@@ -13,6 +13,8 @@ interface TimerState {
   remainingMs: number
   /** Focus sessions finished in this cycle, for the long break. */
   sessions: number
+  /** Focus only: this session's length once started (a 5-minute task's is shorter). */
+  minutes?: number
 }
 
 interface Settings {
@@ -89,6 +91,7 @@ export function usePomodoro({
   nextCardId,
   onFocusDone,
   describe,
+  focusMinutesFor,
 }: {
   storageKey: string
   settings: Settings
@@ -96,6 +99,8 @@ export function usePomodoro({
   nextCardId: string | null
   onFocusDone: (cardId: string | null) => void
   describe: (cardId: string | null) => string
+  /** A task's session length when it isn't a whole pomodoro (a 5-minute task); null for a normal one. */
+  focusMinutesFor?: (cardId: string | null) => number | null
 }) {
   const fresh = (mode: PomodoroMode, cardId: string | null, sessions: number): TimerState => ({
     mode,
@@ -110,6 +115,10 @@ export function usePomodoro({
   done.current = onFocusDone
   const label = useRef(describe)
   label.current = describe
+  const lengthOf = useRef(focusMinutesFor)
+  lengthOf.current = focusMinutesFor
+  /** Session length for a task: shorter for a 5-minute task, else the pomodoro length. */
+  const focusFor = (id: string | null) => lengthOf.current?.(id) ?? settings.focusMinutes
 
   useEffect(() => write(storageKey, state), [storageKey, state])
 
@@ -119,17 +128,27 @@ export function usePomodoro({
     return () => window.clearInterval(id)
   }, [state.endsAt])
 
-  const total = minutesOf(state.mode, settings) * 60_000
-  const remaining = state.endsAt ? Math.max(0, state.endsAt - now) : Math.min(state.remainingMs, total)
   const running = Boolean(state.endsAt)
+  const fullFocus = settings.focusMinutes * 60_000
+  // Whether the session hasn't started yet (judged on the full pomodoro, so a 5-minute task's shorter total doesn't hide it).
+  const notStarted = !running && state.remainingMs >= (state.mode === 'focus' ? Math.min(fullFocus, (state.minutes ?? settings.focusMinutes) * 60_000) : minutesOf(state.mode, settings) * 60_000)
+  const cardId = state.mode === 'focus' && notStarted && !state.cardId ? nextCardId : state.cardId
+  const total = (state.mode === 'focus' ? (state.minutes ?? focusFor(cardId)) : minutesOf(state.mode, settings)) * 60_000
+  const remaining = state.endsAt ? Math.max(0, state.endsAt - now) : Math.min(state.remainingMs, total)
   const idle = !running && state.remainingMs >= total
-  const cardId = state.mode === 'focus' && idle && !state.cardId ? nextCardId : state.cardId
+  /** This focus session is a 5-minute task, not a whole pomodoro. */
+  const quick = state.mode === 'focus' && total < fullFocus
 
   // Session over (also catches one that ended while the tab was closed).
   useEffect(() => {
     if (!state.endsAt || state.endsAt > now) return
     chime()
-    if (state.mode === 'focus') {
+    if (state.mode === 'focus' && state.minutes !== undefined && state.minutes < settings.focusMinutes) {
+      // A 5-minute task: no break after it, and it doesn't count toward the long break.
+      done.current(state.cardId)
+      notify('5-minute task done', `${label.current(state.cardId)} — on to the next one.`)
+      setState(fresh('focus', null, state.sessions))
+    } else if (state.mode === 'focus') {
       const sessions = state.sessions + 1
       const mode: PomodoroMode = sessions % settings.longBreakEvery === 0 ? 'long' : 'break'
       done.current(state.cardId)
@@ -166,9 +185,13 @@ export function usePomodoro({
       askPermission()
       setNow(Date.now())
       setState((s) => {
-        if (forCard !== undefined) return { ...fresh('focus', forCard, s.sessions), endsAt: Date.now() + settings.focusMinutes * 60_000 }
+        if (forCard !== undefined) {
+          const minutes = focusFor(forCard)
+          return { ...fresh('focus', forCard, s.sessions), minutes, endsAt: Date.now() + minutes * 60_000 }
+        }
         const card = s.mode === 'focus' && !s.cardId ? nextCardId : s.cardId
-        return { ...s, cardId: card, endsAt: Date.now() + Math.min(s.remainingMs, minutesOf(s.mode, settings) * 60_000) }
+        const minutes = s.mode === 'focus' ? (s.minutes ?? focusFor(card)) : minutesOf(s.mode, settings)
+        return { ...s, cardId: card, ...(s.mode === 'focus' ? { minutes } : {}), endsAt: Date.now() + Math.min(s.remainingMs, minutes * 60_000) }
       })
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -181,8 +204,9 @@ export function usePomodoro({
   const skip = () =>
     setState((s) => {
       if (s.mode !== 'focus') return fresh('focus', null, s.mode === 'long' ? 0 : s.sessions)
+      if (s.minutes !== undefined && s.minutes < settings.focusMinutes) return fresh('focus', null, s.sessions)
       return fresh((s.sessions + 1) % settings.longBreakEvery === 0 ? 'long' : 'break', null, s.sessions + 1)
     })
 
-  return { mode: state.mode, cardId, running, idle, remaining, total, start, pause, reset, skip }
+  return { mode: state.mode, cardId, running, idle, quick, remaining, total, start, pause, reset, skip }
 }
