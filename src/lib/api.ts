@@ -233,6 +233,8 @@ export interface DayPlan {
   items: DayPlanItem[]
   blocks: DayBlock[]
   updatedAt: string | null
+  /** On a day not planned yet: the earlier plan its unfinished tasks were rolled over from. */
+  rolledFrom?: string
 }
 
 export type DayPlanInput = Omit<DayPlan, 'id' | 'date' | 'updatedAt'>

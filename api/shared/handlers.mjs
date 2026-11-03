@@ -1359,13 +1359,37 @@ function emptyDayPlan(email, date) {
   }
 }
 
-/** GET dayplans/{date} — your plan for that day (an empty one if you haven't made it yet). */
+/** GET dayplans/{date} — your plan for that day (if you haven't made it yet: a fresh one, with unfinished tasks rolled over). */
 export async function getDayPlan({ actor, store, params }) {
   requireDayPlanner(actor)
   const date = optionalDate(params.date, 'date')
   if (!date) throw new HttpError(400, 'invalid_input', 'date is required')
   const saved = await store.get('dayPlans', dayPlanId(actor.email, date))
-  return ok({ plan: saved ? { ...emptyDayPlan(actor.email, date), ...saved } : emptyDayPlan(actor.email, date) })
+  if (saved) return ok({ plan: { ...emptyDayPlan(actor.email, date), ...saved } })
+  return ok({ plan: { ...emptyDayPlan(actor.email, date), ...(await rollover(store, actor.email, date)) } })
+}
+
+/** How far back an unplanned day looks for unfinished tasks to roll over. */
+const ROLLOVER_DAYS = 14
+
+/**
+ * A day you haven't planned yet starts with the unfinished tasks from your most recent
+ * plan (within ROLLOVER_DAYS before it): every task not in Done or archived, with the
+ * pomodoros it had left. Nothing is saved until you change the day, so this stays
+ * current as you finish things on the earlier day.
+ */
+async function rollover(store, email, date) {
+  const [y, m, d] = date.split('-').map(Number)
+  const since = new Date(Date.UTC(y, m - 1, d) - ROLLOVER_DAYS * 86400000).toISOString().slice(0, 10)
+  const [prev] = await store.find('dayPlans', { email, date: { gte: since, lt: date } }, { orderBy: { field: 'date', desc: true }, limit: 1 })
+  if (!prev?.items?.length) return {}
+  const items = []
+  for (const item of prev.items) {
+    const card = await store.get('cards', item.cardId)
+    if (!card || card.column === 'done' || card.archived) continue
+    items.push({ cardId: item.cardId, pomodoros: Math.max(1, item.pomodoros - item.done), done: 0 })
+  }
+  return items.length ? { items, rolledFrom: prev.date } : {}
 }
 
 /**

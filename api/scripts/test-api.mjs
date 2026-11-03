@@ -617,6 +617,45 @@ await test('day plans: private to each person, validated, and saved per day', as
   assert.equal((await call('GET /dayplans/{date}', { as: ME, params: { date: 'today' } })).status, 400)
 })
 
+await test('day plans: unfinished tasks roll over to the next day you open', async () => {
+  const ME = 'roller@example.com'
+  await call('POST /members', { as: ADMIN, body: { email: ME, name: 'Roller', workspaceIds: ['alpha-team'] } })
+  const project = (await call('POST /workspaces/{id}/projects', { as: ME, params: { id: 'alpha-team' }, body: { name: 'Roll' } })).body.project
+  const add = async (title) => (await call('POST /projects/{id}/cards', { as: ME, params: { id: project.id }, body: { title, column: 'todo' } })).body.card
+  const [open, quick, finished] = [await add('Open'), await add('Small'), await add('Finished')]
+  await call('POST /dayplans/{date}', {
+    as: ME,
+    params: { date: '2026-11-02' },
+    body: {
+      items: [
+        { cardId: open.id, pomodoros: 3, done: 1 },
+        { cardId: quick.id, pomodoros: 1, done: 0 },
+        { cardId: finished.id, pomodoros: 2, done: 2 },
+        { cardId: 'gone', pomodoros: 1, done: 0 },
+      ],
+      blocks: [{ kind: 'focus', cardId: open.id, start: '09:00', end: '09:25' }],
+    },
+  })
+  await call('PATCH /cards/{id}', { as: ME, params: { id: finished.id }, body: { column: 'done' } })
+
+  const next = (await call('GET /dayplans/{date}', { as: ME, params: { date: '2026-11-04' } })).body.plan
+  assert.equal(next.rolledFrom, '2026-11-02')
+  assert.deepEqual(next.items, [
+    { cardId: open.id, pomodoros: 2, done: 0 },
+    { cardId: quick.id, pomodoros: 1, done: 0 },
+  ], 'open tasks carry their remaining pomodoros; done and missing tasks stay behind')
+  assert.deepEqual(next.blocks, [], 'times are not carried over')
+  assert.equal(next.updatedAt, null, 'nothing is saved until the day is changed')
+  assert.equal((await call('GET /dayplans/{date}', { as: ME, params: { date: '2026-11-16' } })).body.plan.items.length, 2, '14 days later still rolls over')
+  assert.deepEqual((await call('GET /dayplans/{date}', { as: ME, params: { date: '2026-11-17' } })).body.plan.items, [], 'only the last 14 days roll over')
+
+  await call('POST /dayplans/{date}', { as: ME, params: { date: '2026-11-04' }, body: { items: [] } })
+  const cleared = (await call('GET /dayplans/{date}', { as: ME, params: { date: '2026-11-04' } })).body.plan
+  assert.deepEqual(cleared.items, [], 'a saved day keeps what you saved')
+  assert.equal(cleared.rolledFrom, undefined)
+  assert.deepEqual((await call('GET /dayplans/{date}', { as: 'planner@example.com', params: { date: '2026-11-04' } })).body.plan.items.some((i) => i.cardId === open.id), false, "someone else's plan never rolls into yours")
+})
+
 await test('admins cannot demote or delete themselves', async () => {
   assert.equal((await call('PATCH /members/{email}', { as: ADMIN, params: { email: ADMIN }, body: { role: 'member' } })).status, 400)
   assert.equal((await call('DELETE /members/{email}', { as: ADMIN, params: { email: ADMIN } })).status, 400)

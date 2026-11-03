@@ -112,6 +112,10 @@ export default function TodayPlanner({
         if (!live) return
         latest.current = r.plan
         setPlan(r.plan)
+        if (r.plan.rolledFrom && r.plan.items.length) {
+          const n = r.plan.items.length
+          setNote(`${n} unfinished task${n === 1 ? '' : 's'} rolled over from ${longDate(r.plan.rolledFrom)}. Press Auto-plan to schedule ${n === 1 ? 'it' : 'them'}.`)
+        }
       })
       .catch((err) => live && setError(errorMessage(err, "Could not load the day's plan.")))
     return () => {
